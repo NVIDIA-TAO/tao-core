@@ -1,20 +1,9 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Configuration hyperparameter schema for the dataset."""
 
-from typing import List
-from dataclasses import dataclass
+from typing import Any, List
+from dataclasses import dataclass, field
 
 from nvidia_tao_core.config.utils.types import (
     BOOL_FIELD,
@@ -49,24 +38,33 @@ class Dataset:
         valid_max="inf",
         display_name="Number of workers"
     )
-    images: str = STR_FIELD(
-        value="",
-        default_value="",
-        display_name="image root",
-        description="A path to image root"
-    )
-    annotations: str = STR_FIELD(
-        value="",
-        default_value="",
-        display_name="annotation root",
-        description="A path to annotation root"
-    )
-    panoptic: str = STR_FIELD(
-        value="",
-        default_value="",
-        display_name="panoptic root",
-        description="A path to panoptic root"
-    )
+    images: Any = field(default=None, metadata={
+        "display_name": "image root",
+        "value_type": "any",
+        "description": "Path(s) to image root. String or list of strings. "
+                       "Optional when the annotation JSON contains img_path.",
+        "default_value": None,
+    })
+    annotations: Any = field(default=None, metadata={
+        "display_name": "annotation root",
+        "value_type": "any",
+        "description": "Path(s) to annotation JSON. String or list of strings.",
+        "default_value": None,
+    })
+    panoptic: Any = field(default=None, metadata={
+        "display_name": "panoptic root",
+        "value_type": "any",
+        "description": "Path(s) to panoptic mask root. String or list of strings.",
+        "default_value": None,
+    })
+    names: Any = field(default=None, metadata={
+        "display_name": "dataset names",
+        "value_type": "any",
+        "description": "Human-readable name(s) for each dataset. String or list of strings "
+                       "in the same order as annotations. Used as metric suffixes when "
+                       "evaluating multiple datasets separately.",
+        "default_value": None,
+    })
 
 
 @dataclass
@@ -192,12 +190,12 @@ class OneFormerDatasetConfig:
         description="Maximum sequence length",
         display_name="maximum sequence length"
     )
-    image_size: int = INT_FIELD(
-        value=1024,
-        default_value=1024,
-        description="Image size",
-        display_name="image size"
-    )
+    image_size: Any = field(default=1024, metadata={
+        "display_name": "image size",
+        "value_type": "any",
+        "description": "Image size. Either a single integer (square) or a list of two integers [W, H].",
+        "default_value": 1024,
+    })
     min_scale: float = FLOAT_FIELD(
         value=0.1,
         description="Minimum scale",

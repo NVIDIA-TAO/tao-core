@@ -1,16 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Configuration hyperparameter schema for the dataset."""
 
@@ -194,6 +183,16 @@ class DINOAugmentationConfig:
         valid_min=1,
         valid_max="inf"
     )
+    pad_size_divisor: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description="""If set, replace FixedPad at val/eval/infer time with a
+                    pad-to-multiple-of-N op that mirrors mmdet Pad(size_divisor).
+                    Match the reference Co-DETR test_pipeline by setting this to 32.""",
+        display_name="pad size divisor",
+        valid_min=1,
+        valid_max="inf"
+    )
 
 
 @dataclass
@@ -305,4 +304,10 @@ class DINODatasetConfig:
         DINOAugmentationConfig(),
         description="Configuration parameters for data augmentation",
         display_name="augmentation",
+    )
+    contiguous_labels: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="contiguous labels",
+        description="Flag to enable contiguous label mapping.",
     )

@@ -1,36 +1,25 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Base Inference Microservice Server - Abstract base class for persistent model servers in StatefulSet containers
 
 Provides common functionality for loading models, serving inference requests, and managing server lifecycle
 """
 
+import base64
 import os
 import json
 import logging
+import re
+import tempfile
 import threading
 import time
+import requests
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Dict, List, Any, Tuple
 from flask import Flask, request, jsonify
 
-from .container_handler import prepare_data_before_job_run
-from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import (
-    download_from_user_storage, get_file_path_from_cloud_string
-)
 from nvidia_tao_core.microservices.utils.core_utils import safe_load_file
 
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -42,17 +31,56 @@ logging.basicConfig(
 logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
+# MIME types accepted on the /v1/chat/completions endpoint for inline base64 media.
+_EXT_MAP = {
+    'video/mp4': '.mp4', 'video/avi': '.avi',
+    'video/webm': '.webm', 'video/mkv': '.mkv',
+    'video/x-matroska': '.mkv', 'video/mov': '.mov',
+    'image/jpeg': '.jpg', 'image/png': '.png',
+    'image/webp': '.webp', 'image/gif': '.gif',
+    'image/bmp': '.bmp', 'image/tiff': '.tiff',
+}
+_MAX_MEDIA_BYTES = 512 * 1024 * 1024  # mirrors OpenAI's chat-completions 512 MB payload cap
+
+# vLLM/OpenAI sampling parameters forwarded from the /v1/chat/completions
+# request body to ``run_inference(**kwargs)``. The key is the request-body
+# field; the value is the kwarg name passed downstream. The only rename is
+# OpenAI's ``max_tokens`` → HuggingFace's ``max_new_tokens``. Everything
+# else is forwarded as-is; subclasses (or model.generate) decide which
+# keys they actually consume. Mirrors the documented surface at
+# https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html.
+_SAMPLING_PARAM_MAP = {
+    "max_tokens": "max_new_tokens",
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "min_p": "min_p",
+    "repetition_penalty": "repetition_penalty",
+    "frequency_penalty": "frequency_penalty",
+    "presence_penalty": "presence_penalty",
+    "seed": "seed",
+    "stop": "stop",
+    "n": "n",
+    "best_of": "best_of",
+    "length_penalty": "length_penalty",
+    "ignore_eos": "ignore_eos",
+    "min_tokens": "min_tokens",
+}
+_SAMPLING_PARAM_DEFAULTS = {
+    "max_new_tokens": 1024,
+    "temperature": 0.7,
+}
+
 
 class BaseInferenceMicroserviceServer(ABC):
     """Abstract base class for TAO model servers in StatefulSet containers"""
 
-    def __init__(self, job_id: str, port: int = 8080, cloud_storage=None, **model_params):
+    def __init__(self, job_id: str, port: int = 8080, **model_params):
         """Initialize base model server
 
         Args:
             job_id: Unique job identifier
             port: Server port (default 8080)
-            cloud_storage: Cloud storage configuration
             **model_params: Model-specific parameters (e.g., model_path, etc.)
         """
         self.job_id = job_id
@@ -63,17 +91,14 @@ class BaseInferenceMicroserviceServer(ABC):
         self.model_load_error = None
         self.server_initializing = True
         self.initialization_error = None
-        self.cloud_storage = cloud_storage
         self.model_state_dir = "/tmp/tao_models"
         self.model_params = model_params  # Store all model-specific params
 
         # Progress tracking for initialization and downloads
         self.progress = {
-            "stage": "initializing",  # initializing, downloading_model, loading_model, ready, error
+            "stage": "initializing",  # initializing, loading_model, ready, error
             "message": "Server initialization starting",
             "remaining_steps": [
-                "Prepare data and cloud storage",
-                "Download model files",
                 "Load model into memory",
                 "Ready for inference"
             ],
@@ -192,33 +217,13 @@ class BaseInferenceMicroserviceServer(ABC):
                 logger.warning("Health monitor thread did not shutdown gracefully")
             self._health_monitor_thread = None
 
-    def _handle_download_progress(self, percentage: int, message: str):
-        """Handle download progress updates from progress bridge
-
-        Args:
-            percentage: Overall progress percentage (used to determine remaining steps)
-            message: Progress message from ProgressTracker
-        """
-        # Extract key information from message for details
-        details = {"phase": "downloading", "download_message": message}
-
-        # Determine remaining steps based on progress
-        remaining_steps = [
-            "Complete model file download",
-            "Load model into memory",
-            "Ready for inference"
-        ]
-
-        # Keep message simple - details contain the verbose download info
-        self.update_progress(
-            stage="initializing",
-            message="Downloading model files",
-            remaining_steps=remaining_steps,
-            details=details
-        )
-
     def _initialize_background(self, job_data: Dict[str, Any], docker_env_vars: Dict[str, Any]):
-        """Initialize server configuration in background thread"""
+        """Initialize server configuration in background thread.
+
+        The inference service does not depend on cloud storage: model weights are
+        loaded directly from the HuggingFace Hub or a local filesystem path, and
+        request inputs must be sent as inline data or http(s) URLs.
+        """
         try:
             logger.info("Starting background initialization...")
             self.server_initializing = True
@@ -229,54 +234,13 @@ class BaseInferenceMicroserviceServer(ABC):
                 stage="initializing",
                 message="Starting server initialization",
                 remaining_steps=[
-                    "Prepare data and cloud storage",
-                    "Download model files",
                     "Load model into memory",
                     "Ready for inference"
                 ],
                 details={"phase": "starting"}
             )
 
-            # Update progress: Preparing to download files
-            self.update_progress(
-                stage="initializing",
-                message="Preparing data and cloud storage",
-                remaining_steps=[
-                    "Download model files",
-                    "Load model into memory",
-                    "Ready for inference"
-                ],
-                details={"phase": "preparing"}
-            )
-
-            # Register progress callback to receive download progress updates
-            from nvidia_tao_core.microservices.handlers.inference_progress_bridge import (
-                register_progress_callback, unregister_progress_callback
-            )
-
-            try:
-                # Register callback to receive progress updates during downloads
-                register_progress_callback(job_data["job_id"], self._handle_download_progress)
-
-                # Prepare data (downloads files, sets up cloud storage) - this can be slow
-                cloud_storage, specs, _ = prepare_data_before_job_run(job_data, docker_env_vars)
-            finally:
-                # Unregister callback after downloads complete
-                unregister_progress_callback(job_data["job_id"])
-
-            # Update progress: Files downloaded
-            self.update_progress(
-                stage="initializing",
-                message="Data preparation completed",
-                remaining_steps=[
-                    "Load model into memory",
-                    "Ready for inference"
-                ],
-                details={"phase": "completed", "specs": list(specs.keys())}
-            )
-
-            # Update instance with downloaded/prepared data
-            self.cloud_storage = cloud_storage
+            specs = job_data.get("specs", {}) or {}
             self.model_params.update(specs)
 
             self.server_initializing = False
@@ -365,12 +329,10 @@ class BaseInferenceMicroserviceServer(ABC):
         return {}
 
     def request_auto_deletion(self, reason: str = "idle_timeout_exceeded", error: str = None):
-        """Request auto-deletion by sending status callback to TAO API
+        """Request auto-deletion by POSTing status to TAO logging URL.
 
-        This method is called when idle timeout is exceeded or when a fatal error
-        occurs during initialization/model loading. It uses the existing
-        status_callback mechanism from cloud_handlers/utils.py to send the status
-        update to the API (which has DB access via save_dnn_status).
+        Called on idle timeout or a fatal init / model-load failure. This is a
+        plain HTTP call — the inference service has no cloud-storage dependency.
 
         Args:
             reason: Reason for requesting deletion (idle_timeout_exceeded, initialization_failed, model_loading_failed)
@@ -379,10 +341,6 @@ class BaseInferenceMicroserviceServer(ABC):
         try:
             logger.info("Requesting auto-deletion via status callback (reason: %s)", reason)
 
-            # Import here to avoid circular dependencies
-            from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
-
-            # Create status data in the format expected by status_callback
             status_data = {
                 "message": "AUTO_DELETION_REQUESTED",
                 "status": "AUTO_DELETION_REQUESTED",
@@ -390,18 +348,41 @@ class BaseInferenceMicroserviceServer(ABC):
                 "idle_timeout_minutes": self.idle_timeout_minutes,
                 "reason": reason,
                 "last_request_time": self.last_request_time.isoformat(),
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
             if error:
                 status_data["error"] = error
 
-            # Convert to JSON string as expected by status_callback
-            data_string = json.dumps(status_data)
+            if os.getenv("DEBUG_ENABLED", "").lower() == "true":
+                logger.info("DEBUG_ENABLED=True: Skipping auto-deletion status callback")
+                return
 
-            # Send status callback (will use TAO_LOGGING_SERVER_URL env var)
-            status_callback(data_string)
+            logging_url = os.getenv("TAO_LOGGING_SERVER_URL", "")
+            admin_key = os.getenv("TAO_ADMIN_KEY")
+            if not logging_url or not admin_key:
+                logger.warning(
+                    "TAO_LOGGING_SERVER_URL or TAO_ADMIN_KEY not set; "
+                    "skipping auto-deletion callback for job %s", self.job_id
+                )
+                return
 
-            logger.info(f"Auto-deletion status callback sent for job {self.job_id}")
+            payload = {
+                "experiment_number": os.getenv("AUTOML_EXPERIMENT_NUMBER", "0"),
+                "status": json.dumps(status_data),
+            }
+            response = requests.post(
+                logging_url + ":status_update",
+                json=payload,
+                headers={"Authorization": f"Bearer {admin_key}"},
+                timeout=180,
+            )
+            if response.ok:
+                logger.info(f"Auto-deletion status callback sent for job {self.job_id}")
+            else:
+                logger.error(
+                    "Auto-deletion status callback failed: %s %s",
+                    response.status_code, response.text[:500]
+                )
 
         except Exception as e:
             logger.error(f"Failed to send auto-deletion status callback: {e}")
@@ -541,59 +522,22 @@ class BaseInferenceMicroserviceServer(ABC):
         load_thread.start()
         return True
 
-    def download_and_process_file(self, input_file: str, update_progress: bool = True) -> str:
-        """Download file from cloud storage if needed and return local path
+    @staticmethod
+    def _reject_cloud_uri(input_file: str) -> str:
+        """Reject cloud-storage URIs on the inference path.
 
-        Args:
-            input_file: Input file path or cloud URL
-            update_progress: Whether to update progress during download
-
-        Returns:
-            Local file path
+        The inference service does not authenticate to any cloud. Callers must
+        send inline data (data: URIs / base64) or http(s):// URLs that the
+        service can fetch anonymously.
         """
-        try:
-            # Update progress if requested
-            if update_progress:
-                self.update_progress(
-                    stage="downloading_file",
-                    message=f"Downloading file: {os.path.basename(input_file)}",
-                    remaining_steps=self.progress.get("remaining_steps", []),
-                    details={"file": input_file, "phase": "downloading"}
-                )
-
-            # Handle cloud storage URLs by downloading first
-            _, _, cloud_file_path = get_file_path_from_cloud_string(input_file)
-            actual_file_path = download_from_user_storage(
-                cloud_storage=self.cloud_storage,
-                job_id=self.job_id,
-                value=cloud_file_path if self.cloud_storage else input_file,
-                dictionary={},
-                key="",
-                preserve_source_path=True,
-                reset_value=False
+        cloud_prefixes = ('s3://', 'gs://', 'az://', 'cs://', 'aws://')
+        if isinstance(input_file, str) and input_file.startswith(cloud_prefixes):
+            raise ValueError(
+                f"Cloud-storage URIs are not supported by the inference service: "
+                f"{input_file}. Send the media inline (data: URI) or via an "
+                f"http(s):// URL."
             )
-
-            # Update progress after download complete
-            if update_progress:
-                self.update_progress(
-                    stage="downloading_file",
-                    message=f"File downloaded: {os.path.basename(input_file)}",
-                    remaining_steps=self.progress.get("remaining_steps", []),
-                    details={"file": input_file, "local_path": actual_file_path, "phase": "completed"}
-                )
-
-            return actual_file_path
-
-        except Exception as e:
-            logger.error(f"Failed to process {input_file}: {e}")
-            if update_progress:
-                self.update_progress(
-                    stage="error",
-                    message=f"Failed to download file: {os.path.basename(input_file)}",
-                    remaining_steps=[],
-                    details={"file": input_file, "error": str(e), "phase": "download_failed"}
-                )
-            raise
+        return input_file
 
     def run_inference(self, **kwargs) -> Dict[str, Any]:
         """Run inference with error handling and timing
@@ -827,6 +771,182 @@ class BaseInferenceMicroserviceServer(ABC):
                     "timestamp": datetime.now().isoformat()
                 }), 500
 
+        @app.route('/v1/chat/completions', methods=['POST'])
+        def chat_completions():
+            """vLLM/OpenAI-compatible chat completions endpoint.
+
+            Request body (subset of OpenAI Chat Completions):
+                messages: list of {role, content}. `content` may be a string,
+                    or a list of items with `type` in {"text", "image_url",
+                    "video_url"}. `image_url`/`video_url` items carry a
+                    nested {"url": "<http url or data: URI>"}. Inline base64
+                    payloads must declare a MIME type present in `_EXT_MAP`
+                    and stay under `_MAX_MEDIA_BYTES`.
+                Sampling params: any key in ``_SAMPLING_PARAM_MAP`` is
+                    forwarded to ``run_inference`` (``max_tokens`` →
+                    ``max_new_tokens``, plus ``temperature``, ``top_p``,
+                    ``top_k``, ``min_p``, ``repetition_penalty``,
+                    ``frequency_penalty``, ``presence_penalty``, ``seed``,
+                    ``stop``, ``n``, ``best_of``, ``length_penalty``,
+                    ``ignore_eos``, ``min_tokens``). Defaults:
+                    ``max_new_tokens=1024``, ``temperature=0.7``. Subclasses
+                    consume whichever keys their model supports.
+                model (str, optional): accepted for client compatibility but
+                    ignored — the response always reports the actual loaded
+                    model identifier (the configured ``hf_model`` /
+                    ``model_path``, falling back to the server class name).
+
+            Subclasses' `run_model_inference` receives kwargs `media`
+            (list of local paths or URLs), `prompt`, `system_prompt`, plus
+            whatever sampling params the request included.
+
+            Response: an OpenAI Chat Completions object with `id`, `object`,
+            `created`, `model`, and a single `choices[0]` entry holding the
+            assistant message.
+            """
+            try:
+                self.update_last_request_time()
+
+                if self.server_initializing:
+                    return jsonify({
+                        "error": {"message": "Server is initializing, please wait", "type": "server_initializing"}
+                    }), 202
+                if self.initialization_error:
+                    return jsonify({
+                        "error": {
+                            "message": f"Server initialization failed: {self.initialization_error}",
+                            "type": "initialization_error"
+                        }
+                    }), 503
+                if self.model_loading:
+                    return jsonify({
+                        "error": {"message": "Model is currently loading, please wait", "type": "model_loading"}
+                    }), 202
+                if self.model_load_error:
+                    return jsonify({
+                        "error": {
+                            "message": f"Model failed to load: {self.model_load_error}",
+                            "type": "model_load_error"
+                        }
+                    }), 503
+                if not self.model_loaded:
+                    return jsonify({
+                        "error": {"message": "Model not loaded yet", "type": "model_not_ready"}
+                    }), 503
+
+                data = request.json
+                if not data:
+                    return jsonify({
+                        "error": {"message": "Request body is required", "type": "invalid_request"}
+                    }), 400
+
+                messages = data.get("messages", [])
+
+                system_prompt = next(
+                    (msg.get("content", "") for msg in messages if msg.get("role") == "system"),
+                    ""
+                )
+
+                media_uris = []
+                prompt = ""
+                for msg in messages:
+                    if msg.get("role") == "user":
+                        content = msg.get("content", [])
+                        if isinstance(content, list):
+                            for item in content:
+                                item_type = item.get("type")
+                                if item_type == "video_url":
+                                    video_url = item.get("video_url", {}).get("url")
+                                    if video_url:
+                                        media_uris.append(video_url)
+                                elif item_type == "image_url":
+                                    image_url = item.get("image_url", {}).get("url")
+                                    if image_url:
+                                        media_uris.append(image_url)
+                                elif item_type == "text":
+                                    prompt = item.get("text", "")
+                        elif isinstance(content, str):
+                            prompt = content
+                        break
+
+                sampling_kwargs = dict(_SAMPLING_PARAM_DEFAULTS)
+                for req_key, kwarg_key in _SAMPLING_PARAM_MAP.items():
+                    if req_key in data:
+                        sampling_kwargs[kwarg_key] = data[req_key]
+
+                temp_files = []
+                media = []
+                try:
+                    for uri in media_uris:
+                        m = re.match(r'data:([^;]+);base64,(.+)', uri, re.DOTALL)
+                        if m:
+                            media_type = m.group(1)
+                            ext = _EXT_MAP.get(media_type)
+                            if ext is None:
+                                raise ValueError(f"Unsupported media type: {media_type}")
+                            b64_payload = m.group(2)
+                            # Approximate decoded size from base64 length without decoding first.
+                            if (len(b64_payload) * 3) // 4 > _MAX_MEDIA_BYTES:
+                                raise ValueError(
+                                    f"Media payload exceeds {_MAX_MEDIA_BYTES} byte limit"
+                                )
+                            raw = base64.b64decode(b64_payload)
+                            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                                tmp.write(raw)
+                            temp_files.append(tmp.name)
+                            media.append(tmp.name)
+                        else:
+                            media.append(uri)
+
+                    result = self.run_inference(
+                        media=media,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        **sampling_kwargs,
+                    )
+                finally:
+                    for f in temp_files:
+                        try:
+                            os.unlink(f)
+                        except OSError:
+                            pass
+
+                response_text = result.get("response", "") if isinstance(result, dict) else str(result)
+
+                # Always report the actual loaded model — don't echo the
+                # client-supplied "model" field, which could disagree with
+                # what's running on this container.
+                served_model = (
+                    self.model_params.get("hf_model") or
+                    self.model_params.get("model_path") or
+                    self.__class__.__name__
+                )
+                chat_id = "chatcmpl-" + datetime.now().strftime("%Y%m%d%H%M%S%f")
+                return jsonify({
+                    "id": chat_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": served_model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": response_text},
+                            "finish_reason": "stop"
+                        }
+                    ]
+                })
+
+            except ValueError as e:
+                logger.warning(f"Chat completions invalid request: {e}")
+                return jsonify({
+                    "error": {"message": str(e), "type": "invalid_request"}
+                }), 400
+            except Exception as e:
+                logger.error(f"Chat completions request failed: {e}")
+                return jsonify({
+                    "error": {"message": str(e), "type": "internal_error"}
+                }), 500
+
         return app
 
     def start_server_immediate(self):
@@ -915,7 +1035,6 @@ class BaseInferenceMicroserviceServer(ABC):
         server_instance = cls(
             job_id=job_data["job_id"],
             port=port,
-            cloud_storage=None,  # Will be initialized in background
             **{}  # Empty model params initially
         )
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Pytest test to identify import errors in Python files
 
 This test recursively scans all Python files and checks for import issues.
@@ -65,7 +68,7 @@ def find_python_files(root_dir):
     exclude_dirs = {
         '__pycache__', '.git', '.pytest_cache', 'node_modules',
         'venv', 'env', '.venv', 'build', 'dist', '*.egg-info',
-        'release', 'ci', 'telemetry_gateway', 'scripts'
+        'release', 'ci', 'scripts'
     }
     exclude_files = {
         'test_imports.py', 'setup.py', 'conftest.py',

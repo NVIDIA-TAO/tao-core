@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for consistency between automl_spec_params, spec_params, and data_sources in network configs.
 
 Catches mismatches like automl_spec_params referencing 'distill.teacher_model_path'
