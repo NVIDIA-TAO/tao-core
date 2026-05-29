@@ -1,16 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """HuggingFace Inference Microservice Server - Supports LLM, VLM, and Diffusion models
 
@@ -49,6 +38,39 @@ logging.basicConfig(
 )
 logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
+
+
+def _apply_qwen3vl_cudnn_workaround() -> None:
+    # cuDNN 9.20 on sm_80 (A100) has no Conv3d engine for kernel spatial size
+    # >= 16 in bf16/fp16 with the default NCDHW layout — Qwen3-VL's PatchEmbed
+    # (patch_size=16, temporal_patch_size=2) hits this exactly and raises
+    # "GET was unable to find an engine to execute this computation". cuDNN's
+    # NDHWC engines cover the same shape, so running the conv in
+    # channels_last_3d memory format avoids the gap without touching dtype.
+    try:
+        import torch
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchEmbed
+    except ImportError:
+        return
+
+    if getattr(Qwen3VLVisionPatchEmbed.forward, "_tao_channels_last_3d", False):
+        return
+
+    def forward(self, hidden_states):
+        target_dtype = self.proj.weight.dtype
+        hidden_states = hidden_states.view(
+            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
+        ).to(dtype=target_dtype, memory_format=torch.channels_last_3d)
+        if not self.proj.weight.is_contiguous(memory_format=torch.channels_last_3d):
+            self.proj.weight.data = self.proj.weight.data.to(memory_format=torch.channels_last_3d)
+        return self.proj(hidden_states).reshape(-1, self.embed_dim)
+
+    forward._tao_channels_last_3d = True
+    Qwen3VLVisionPatchEmbed.forward = forward
+    logger.info("Applied channels_last_3d workaround for Qwen3-VL PatchEmbed (cuDNN 9.20 conv3d gap)")
+
+
+_apply_qwen3vl_cudnn_workaround()
 
 
 # Model type detection based on architecture names
@@ -142,16 +164,15 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
         is_diffusion: Whether the loaded model is a diffusion model
     """
 
-    def __init__(self, job_id: str, port: int = 8080, cloud_storage=None, **model_params):
+    def __init__(self, job_id: str, port: int = 8080, **model_params):
         """Initialize HuggingFace inference server
 
         Args:
             job_id: Unique job identifier
             port: Server port (default 8080)
-            cloud_storage: Cloud storage configuration
             **model_params: Model-specific parameters
         """
-        super().__init__(job_id, port, cloud_storage, **model_params)
+        super().__init__(job_id, port, **model_params)
         self.model_state_dir = "/tmp/hf_models"
         self.processor = None
         self.tokenizer = None
@@ -799,10 +820,10 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
                 response = requests.get(image_input, timeout=30)
                 return Image.open(BytesIO(response.content))
 
-            # Check cloud storage path
-            if any(image_input.startswith(prefix) for prefix in ['s3://', 'gs://', 'az://', 'cs://', 'aws://']):
-                local_path = self.download_and_process_file(image_input)
-                return Image.open(local_path)
+            # Reject cloud-storage URIs — the inference service does not
+            # authenticate to any cloud. Callers must send inline data or
+            # plain http(s) URLs.
+            self._reject_cloud_uri(image_input)
 
             # Local file path
             return Image.open(image_input)
@@ -882,19 +903,15 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
 
             logger.info("Running inference with custom function")
 
-            # Create execution namespace
+            # Create execution namespace. The inference service has no cloud
+            # storage; custom code must return generated artifacts via the
+            # response payload (or write them to local paths).
             exec_namespace = {
                 'torch': torch,
                 'pipeline': self.pipeline or self.model,
                 'model': self.model,
                 'processor': self.processor,
                 'tokenizer': self.tokenizer,
-                'cloud_storage': self.cloud_storage,
-                'results_dir': (
-                    getattr(self, 'results_dir', None) or
-                    self.model_params.get('results_dir') or
-                    f"/results/{self.job_id}"
-                ),
                 'tempfile': tempfile,
                 'os': os,
                 'logger': logger,
@@ -1107,64 +1124,29 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
             logger.info(f"Running diffusion inference with task: {self.diffusion_task}")
             output = self.pipeline(**pipe_kwargs)
 
-            # Process outputs based on type
+            # Process outputs based on type. Generated artifacts stay on the
+            # local filesystem of the inference container; their paths are
+            # returned in the response so callers can fetch the bytes (e.g.
+            # via the /v1/chat/completions video data-URI flow) without the
+            # service touching cloud storage.
             output_paths = []
-            output_urls = []
 
             # Handle image outputs
             if hasattr(output, 'images') and output.images:
                 for i, img in enumerate(output.images[:num_images]):
-                    # Save image to temp file
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = f"generated_{timestamp}_{i}.png"
                     local_path = os.path.join(tempfile.gettempdir(), filename)
                     img.save(local_path)
                     output_paths.append(local_path)
 
-                    # Upload to cloud storage if available
-                    results_dir = (
-                        getattr(self, 'results_dir', None) or
-                        self.model_params.get('results_dir') or
-                        f"/results/{self.job_id}"
-                    )
-                    if self.cloud_storage and results_dir:
-                        cloud_path = f"{results_dir}/{filename}"
-                        try:
-                            self.cloud_storage.upload_file(local_path, cloud_path)
-                            output_urls.append(cloud_path)
-                            logger.info(f"Uploaded generated image to: {cloud_path}")
-                        except Exception as e:
-                            logger.warning(f"Failed to upload to cloud storage: {e}")
-                            output_urls.append(local_path)
-                    else:
-                        output_urls.append(local_path)
-
             # Handle video outputs (for video generation models)
             if hasattr(output, 'frames') and output.frames is not None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"generated_{timestamp}.mp4"
                 local_path = os.path.join(tempfile.gettempdir(), filename)
-
-                # Save video frames
                 self._save_video_frames(output.frames, local_path)
                 output_paths.append(local_path)
-
-                # Upload to cloud storage
-                results_dir = (
-                    getattr(self, 'results_dir', None) or
-                    self.model_params.get('results_dir') or
-                    f"/results/{self.job_id}"
-                )
-                if self.cloud_storage and results_dir:
-                    cloud_path = f"{results_dir}/{filename}"
-                    try:
-                        self.cloud_storage.upload_file(local_path, cloud_path)
-                        output_urls.append(cloud_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to upload video to cloud storage: {e}")
-                        output_urls.append(local_path)
-                else:
-                    output_urls.append(local_path)
 
             return {
                 "response": (
@@ -1173,8 +1155,7 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
                 ),
                 "model_type": "diffusion",
                 "diffusion_task": self.diffusion_task,
-                "generated_files": output_urls,
-                "local_paths": output_paths,
+                "generated_files": output_paths,
                 "num_generated": len(output_paths),
                 "prompt": prompt,
                 "negative_prompt": negative_prompt,

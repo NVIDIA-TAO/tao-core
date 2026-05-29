@@ -1,7 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Configuration hyperparameter schema for the model."""
 
-from typing import Optional, List, Tuple
-from dataclasses import dataclass
+from typing import Any, Optional, List, Tuple
+from dataclasses import dataclass, field
 
 from nvidia_tao_core.config.utils.types import (
     BOOL_FIELD,
@@ -490,6 +493,71 @@ class Radio:
 
 
 @dataclass
+class DiNAT:
+    """DiNAT backbone config."""
+
+    embed_dim: int = INT_FIELD(
+        value=192,
+        default_value=192,
+        description="Embedding dimension.",
+        display_name="embed dim",
+    )
+    mlp_ratio: float = FLOAT_FIELD(
+        value=2.0,
+        default_value=2.0,
+        description="MLP ratio.",
+        display_name="mlp ratio",
+    )
+    depths: List[int] = LIST_FIELD(
+        arrList=[3, 4, 18, 5],
+        description="Depths of each stage.",
+        display_name="depths",
+    )
+    num_heads: List[int] = LIST_FIELD(
+        arrList=[6, 12, 24, 48],
+        description="Number of heads of each stage.",
+        display_name="num heads",
+    )
+    kernel_size: int = INT_FIELD(
+        value=7,
+        default_value=7,
+        description="Neighborhood attention kernel size.",
+        display_name="kernel size",
+    )
+    drop_path_rate: float = FLOAT_FIELD(
+        value=0.3,
+        default_value=0.3,
+        description="Drop path rate.",
+        display_name="drop path rate",
+    )
+    dilations: Any = field(
+        default=None,
+        metadata={
+            "display_name": "dilations",
+            "description": "Per-layer dilation schedule (list of lists of ints).",
+            "value_type": "list",
+            "default_value": None,
+        },
+    )
+    out_indices: List[int] = LIST_FIELD(
+        arrList=[0, 1, 2, 3],
+        description="List of output stage indices.",
+        display_name="out indices",
+    )
+    out_features: List[str] = LIST_FIELD(
+        arrList=["res2", "res3", "res4", "res5"],
+        description="List of output features.",
+        display_name="out features",
+    )
+    use_checkpoint: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Use gradient checkpointing.",
+        display_name="use checkpoint",
+    )
+
+
+@dataclass
 class Backbone:
     """Backbone config."""
 
@@ -509,6 +577,11 @@ class Backbone:
         Swin(),
         description="Swin.",
         display_name="swin",
+    )
+    dinat: DiNAT = DATACLASS_FIELD(
+        DiNAT(),
+        description="DiNAT.",
+        display_name="dinat",
     )
     radio: Radio = DATACLASS_FIELD(
         Radio(),

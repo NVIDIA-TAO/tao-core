@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Configuration hyperparameter schema for the model."""
 
@@ -87,7 +76,8 @@ class DepthNetModelConfig:
         default_value="MetricDepthAnything",
         description="Network name",
         valid_options=",".join([
-            "FoundationStereo", "MetricDepthAnything", "RelativeDepthAnything"
+            "FoundationStereo", "FastFoundationStereo",
+            "MetricDepthAnything", "RelativeDepthAnything"
         ])
     )
     mono_backbone: MonoBackBone = DATACLASS_FIELD(
@@ -164,6 +154,17 @@ class DepthNetModelConfig:
         display_name="Mixed Precision Training",
         description="""A flag specifying whether to use mixed precision training""",
     )
+    gwc_feature_normalize: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        display_name="GWC feature L2-normalize",
+        description="""L2-normalize features before group-wise correlation in
+        build_gwc_volume. Matches FFS bp2 training-time intent; without it
+        activations accumulate to ~10^3-10^4 magnitude causing physically
+        invalid disparity output. FoundationStereo path is unaffected because
+        it does not consume this field; FastFoundationStereo reads it from
+        ``self.args.gwc_feature_normalize``.""",
+    )
     n_gru_layers: int = INT_FIELD(
         value=3,
         valid_min=1,
@@ -184,6 +185,116 @@ class DepthNetModelConfig:
         valid_max=2,
         description="resolution of the disparity field (1/2^K)",
         display_name="disparity field resoultion"
+    )
+    motion_encoder_widths: List[int] = LIST_FIELD(
+        arrList=[256, 256, 64, 64],
+        description="BasicMotionEncoder convc1/convc2/convd1/convd2 outputs.",
+        display_name="Motion encoder widths"
+    )
+    motion_encoder_final: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description="BasicMotionEncoder final conv output. None -> hidden_dims[0]-1.",
+        display_name="Motion encoder final"
+    )
+    gru_hidden: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description="SelectiveConvGRU hidden width. None -> hidden_dim arg.",
+        display_name="GRU hidden"
+    )
+    gru_gating_conv_widths: Optional[List[int]] = LIST_FIELD(
+        arrList=None,
+        default_type=None,
+        description="SelectiveConvGRU conv0/conv1 outputs. None -> [input_dim, input_dim+hidden].",
+        display_name="GRU gating conv widths"
+    )
+    disp_head_input_dim: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description="DispHead input width. None -> hidden_dim.",
+        display_name="DispHead input"
+    )
+    disp_head_intermediate: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description="DispHead intermediate width. None -> input_dim.",
+        display_name="DispHead intermediate"
+    )
+    disp_head_pwconv1_widths: Optional[List[int]] = LIST_FIELD(
+        arrList=None,
+        default_type=None,
+        description="DispHead EdgeNext per-encoder pwconv1 widths. None -> [4*intermediate]*2.",
+        display_name="DispHead pwconv1 widths"
+    )
+    mask_widths: List[int] = LIST_FIELD(
+        arrList=[64, 32],
+        description="BasicSelectiveMultiUpdateBlock mask layer 0/2 widths.",
+        display_name="Mask widths"
+    )
+    stem_2_widths: List[int] = LIST_FIELD(
+        arrList=[32, 32],
+        description="stem_2 two-layer widths.",
+        display_name="stem_2 widths"
+    )
+    spx_2_gru_widths: List[int] = LIST_FIELD(
+        arrList=[32, 32, 32, 32],
+        description=(
+            "Four-element [in, mid, rem, out] for spx_2_gru Conv2xDownScale. "
+            "in = mask_feat_4 channels, mid = conv1 output, rem = stem_2x "
+            "channels, out = conv2 output. Default reproduces TAO's "
+            "Conv2x(32, 32) + out_channels*2 formula."
+        ),
+        display_name="spx_2_gru widths"
+    )
+    spx_gru_out: int = INT_FIELD(
+        value=9,
+        default_value=9,
+        description="spx_gru ConvTranspose output channels.",
+        display_name="spx_gru out"
+    )
+    classifier_mid: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description="Classifier mid-layer width. None -> volume_dim//2.",
+        display_name="Classifier mid"
+    )
+    cnet_conv04_widths: Optional[List[int]] = LIST_FIELD(
+        arrList=None,
+        default_type=None,
+        description=(
+            "Per-head output widths for ContextNetSharedBackbone.conv04 "
+            "(net_init head, inp_init head). None -> [hidden_dims[0], "
+            "hidden_dims[0]] (TAO default)."
+        ),
+        display_name="cnet conv04 widths"
+    )
+    cam_mid_channels: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description=(
+            "Hidden dimension for ChannelAttentionEnhancement.fc. None -> "
+            "in_planes // 16 (TAO default). FFS commercial ckpt uses 8."
+        ),
+        display_name="CAM mid channels"
+    )
+    cost_agg_conv_patch_padding: Optional[List[int]] = LIST_FIELD(
+        arrList=None,
+        default_type=None,
+        description=(
+            "Padding for HourGlass.conv_patch Conv3d. None -> [1, 1, 0] "
+            "(TAO default). Pass [0, 0, 0] to match FFS training repo."
+        ),
+        display_name="cost_agg conv_patch padding"
+    )
+    concat_channel: int = INT_FIELD(
+        value=24,
+        default_value=24,
+        description=(
+            "Concat-volume channel count. bp2 ckpt invariant — changing "
+            "breaks ckpt key-shape match."
+        ),
+        display_name="concat channel"
     )
     encoder: str = STR_FIELD(
         value="vitl",

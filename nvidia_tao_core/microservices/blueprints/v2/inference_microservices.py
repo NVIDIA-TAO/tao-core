@@ -1,16 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Inference Microservice blueprint for API v2 inference management endpoints."""
 
@@ -100,12 +89,12 @@ def inference_microservice_start(org_name):
         if hasattr(network_arch, 'value'):
             network_arch = network_arch.value
 
-        # Create experiment request dict with only the fields needed
+        # Create experiment request dict with only the fields needed.
+        # Inference microservice does not depend on cloud storage, so no
+        # workspace is associated with the experiment.
         experiment_request = {
             "network_arch": network_arch,
         }
-        if validated_data.get("workspace"):
-            experiment_request["workspace"] = validated_data.get("workspace")
         if validated_data.get("docker_env_vars"):
             experiment_request["docker_env_vars"] = validated_data.get("docker_env_vars")
         user_id = authentication.get_user_id(request.headers.get('Authorization', ''), org_name)

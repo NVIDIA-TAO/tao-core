@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Default config file."""
 
@@ -67,6 +56,12 @@ class DepthNetInferenceExpConfig(InferenceConfig):
         description="Whether to save the raw pfm output during inference.",
         display_name="Save PFM Output"
     )
+    save_raw_npy: Optional[bool] = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Whether to save the raw fp32 disparity .npy alongside PNG visualization.",
+        display_name="Save NPY Output"
+    )
 
 
 @dataclass
@@ -87,6 +82,15 @@ class DepthNetEvalExpConfig(EvaluateConfig):
         display_name="input height",
         valid_min=1,
     )
+    native_padded: Optional[bool] = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "If True, pad each image to the nearest 32-multiple and run inference "
+            "at native resolution (requires a dynamic-shape TRT engine)."
+        ),
+        display_name="native padded",
+    )
 
 
 @dataclass
@@ -99,6 +103,21 @@ class DepthNetExportExpConfig(ExportConfig):
         description="Number of GRU iterations to export the model.",
         display_name="Valid Iterations",
         valid_min=1,
+    )
+    dynamic_hw: Optional[bool] = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "If True, mark the height and width axes as dynamic in the "
+            "exported ONNX so the engine can be rebuilt with arbitrary input "
+            "shape via gen_trt_engine min/opt/max_height/width. Safe only "
+            "for FastFoundationStereo (EdgeNeXt-only backbone, no positional "
+            "embeddings); ignored with a warning for FoundationStereo and "
+            "mono models because their DINOv2 backbone constant-folds the "
+            "trace patch count into pos-embed shape arithmetic, producing a "
+            "wrong-shape pos-embed at runtime."
+        ),
+        display_name="Dynamic H/W axes",
     )
 
 

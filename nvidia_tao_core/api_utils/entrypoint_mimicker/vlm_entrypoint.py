@@ -1,18 +1,7 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Original source taken from https://github.com/NVIDIA/NeMo
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """VLM entrypoint."""
 
@@ -24,11 +13,7 @@ import shlex
 import subprocess
 import threading
 from contextlib import contextmanager
-from time import time
 import logging
-
-from nvidia_tao_core.telemetry.nvml import get_device_details
-from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -369,7 +354,6 @@ def vlm_launch(neural_network_name, action, specs, job_id=""):
             log_file = f"{logs_dir}/{os.getenv('JOB_ID')}/microservices_log.txt"
 
         progress_bar_pattern = re.compile(r"Epoch \d+: \s*\d+%|\[.*\]")
-        start = time()
         logger.info(f"command: {command}")
         with dual_output(log_file) as (stdout_target, log_target):
             proc = subprocess.Popen(  # pylint: disable=R1732
@@ -445,25 +429,6 @@ def vlm_launch(neural_network_name, action, specs, job_id=""):
     except Exception as e:
         logger.error(f"Error: {e}")
         process_passed = False
-
-    end = time()
-    time_lapsed = int(end - start)
-
-    try:
-        gpu_data = []
-        for device in get_device_details():
-            gpu_data.append(device.get_config())
-        logging.info("Sending telemetry data.")
-        send_telemetry_data(
-            neural_network_name,
-            action,
-            gpu_data,
-            time_lapsed=time_lapsed,
-            pass_status=process_passed
-        )
-    except Exception as e:
-        logging.warning("Telemetry data couldn't be sent, but the command ran successfully.")
-        logging.warning(f"[Error]: {e}")
 
     if not process_passed:
         logger.error("Execution status: FAIL")

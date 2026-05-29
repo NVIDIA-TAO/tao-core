@@ -1,16 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Inference Microservice handler using StatefulSets for long-lived inference"""
 import base64
@@ -24,7 +13,7 @@ import os
 
 from .docker_images import DOCKER_IMAGE_MAPPER
 from nvidia_tao_core.microservices.utils.handler_utils import (
-    Code, add_workspace_to_cloud_metadata, get_model_results_path
+    Code, get_model_results_path
 )
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import get_handler_metadata, BACKEND
 from nvidia_tao_core.microservices.utils.core_utils import read_network_config
@@ -84,7 +73,7 @@ class InferenceMicroserviceHandler:
                 network_arch = experiment_metadata.get("network_arch", "vila")
             logger.info("Network architecture from experiment metadata: %s", network_arch)
 
-        # Get experiment metadata (needed for workspace and other settings)
+        # Get experiment metadata (used for model-path resolution etc.).
         experiment_metadata = get_handler_metadata(experiment_id, kind="experiments")
 
         folder_path_function = "parent_model"
@@ -180,18 +169,10 @@ class InferenceMicroserviceHandler:
         docker_env_vars["TAO_LOGGING_SERVER_URL"] = status_url
         docker_env_vars["TAO_ADMIN_KEY"] = get_admin_key()
 
-        workspace_id = experiment_metadata.get("workspace", "")
-        workspace_metadata = get_handler_metadata(workspace_id, kind="workspaces")
-        cloud_metadata = {}
-        add_workspace_to_cloud_metadata(workspace_metadata, cloud_metadata)
-
-        cloud_type = workspace_metadata.get('cloud_type', '')
-        cloud_details = workspace_metadata.get('cloud_specific_details', {})
-        bucket_name = cloud_details.get('cloud_bucket_name', '')
-
+        # Inference microservice does not depend on cloud storage:
+        # no workspace_id / cloud_metadata / results_dir is propagated.
         specs = {
             "model_path": model_path,
-            "results_dir": f"{cloud_type}://{bucket_name}/results/{job_id}",
         }
 
         # Propagate additional parameters from job_config to specs
@@ -219,7 +200,6 @@ class InferenceMicroserviceHandler:
         job_metadata = {
             "job_id": job_id,
             "specs": specs,
-            "cloud_metadata": cloud_metadata,
             "neural_network_name": network_arch,
         }
 

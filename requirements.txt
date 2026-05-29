@@ -24,7 +24,6 @@ omegaconf==2.3.0
 orjson
 packaging
 pandas
-pyarmor
 pycryptodome==3.23.0
 pycocotools
 pydicom==3.0.1

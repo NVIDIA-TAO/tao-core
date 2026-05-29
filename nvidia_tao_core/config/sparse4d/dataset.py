@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Configuration hyperparameter schema for the dataset."""
 
@@ -317,14 +306,80 @@ class Omniverse3DDetTrackDatasetConfig:
     use_h5_file_for_rgb: bool = BOOL_FIELD(
         value=False,
         default_value=False,
-        description="Use H5 file",
-        display_name="Use H5 file"
+        description="Use H5 file for RGB images",
+        display_name="Use H5 file for RGB"
     )
     use_h5_file_for_depth: bool = BOOL_FIELD(
         value=True,
         default_value=True,
-        description="Use H5 file",
-        display_name="Use H5 file"
+        description="Use H5 file for depth maps",
+        display_name="Use H5 file for depth"
+    )
+    lazy_load: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Defer pkl loading to __getitem__ using a pre-built index",
+        display_name="Lazy load annotations"
+    )
+    lazy_load_cache_size: int = INT_FIELD(
+        value=50,
+        default_value=50,
+        valid_min=1,
+        valid_max="inf",
+        description="Max number of pkl files held in the LRU cache when lazy loading",
+        display_name="Lazy load cache size"
+    )
+    pkl_sample_size: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description="If >0, sample this many pkl files per epoch (balanced by camera count). Requires lazy_load=True.",
+        display_name="PKL sample size per epoch"
+    )
+    pkl_cam_counts_path: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Path to pickle mapping pkl_path -> num_cameras for balanced PKL sampling",
+        display_name="PKL camera counts path"
+    )
+    fps_drop_prob: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max=1.0,
+        description="Probability to downsample a scene to a lower FPS during training data loading",
+        display_name="FPS drop probability"
+    )
+    target_fps_choices: List[int] = LIST_FIELD(
+        arrList=[30, 20, 15, 10, 6, 5, 3, 2, 1],
+        default_value=[30, 20, 15, 10, 6, 5, 3, 2, 1],
+        description="List of target FPS values for FPS drop augmentation",
+        display_name="Target FPS choices"
+    )
+    max_cameras: int = INT_FIELD(
+        value=-1,
+        default_value=-1,
+        valid_min=-1,
+        valid_max="inf",
+        description=(
+            "If >0, randomly subsample to this many cameras per frame during training to save GPU memory. "
+            "Any value <=0 (e.g., -1 or 0) disables subsampling and uses all cameras."
+        ),
+        display_name="Max cameras per frame"
+    )
+    eval_dist_fcn: str = STR_FIELD(
+        value="iou_3d",
+        default_value="iou_3d",
+        description="Distance function for evaluation: 'center_distance', 'iou_3d', or 'both'",
+        display_name="Evaluation distance function",
+        valid_options="center_distance,iou_3d,both",
+    )
+    eval_hota: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description="Whether to run HOTA tracking evaluation in addition to AMOTA",
+        display_name="Enable HOTA evaluation"
     )
     num_frames: int = INT_FIELD(
         value=200,
