@@ -888,7 +888,7 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
             # ... save to file ...
             return {
                 "response": "Generated video",
-                "generated_files": ["/path/to/video.mp4"],
+                "generated_files": ["/path/to/video.gif"],
             }
         '''
 
@@ -1143,9 +1143,9 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
             # Handle video outputs (for video generation models)
             if hasattr(output, 'frames') and output.frames is not None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"generated_{timestamp}.mp4"
+                filename = f"generated_{timestamp}.gif"
                 local_path = os.path.join(tempfile.gettempdir(), filename)
-                self._save_video_frames(output.frames, local_path)
+                local_path = self._save_video_frames(output.frames, local_path)
                 output_paths.append(local_path)
 
             return {
@@ -1169,79 +1169,126 @@ class HuggingFaceInferenceMicroserviceServer(BaseInferenceMicroserviceServer):
             logger.error(traceback.format_exc())
             raise
 
-    def _save_video_frames(self, frames, output_path: str, fps: int = 16):
-        """Save video frames to a video file
+    @staticmethod
+    def _is_frame_like(value: Any) -> bool:
+        """Return whether value looks like one image frame."""
+        if isinstance(value, Image.Image):
+            return True
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            return False
+        return len(shape) in (2, 3)
+
+    @classmethod
+    def _normalize_video_frames(cls, frames: Any) -> List[Any]:
+        """Flatten common diffusion output frame containers to one frame list."""
+        if frames is None:
+            return []
+
+        shape = getattr(frames, "shape", None)
+        if shape is not None and len(shape) >= 4:
+            return [frames[i] for i in range(len(frames))]
+
+        if isinstance(frames, (str, bytes, Image.Image)):
+            return [frames]
+
+        try:
+            frame_count = len(frames)
+        except TypeError:
+            return [frames]
+
+        if frame_count == 0:
+            return []
+
+        first = frames[0]
+        if (
+            not cls._is_frame_like(first) and
+            not isinstance(first, (str, bytes)) and
+            hasattr(first, "__len__")
+        ):
+            return cls._normalize_video_frames(first)
+
+        return list(frames)
+
+    @staticmethod
+    def _frame_to_pil(frame: Any) -> Image.Image:
+        """Convert a diffusion frame object to an RGB Pillow image."""
+        if isinstance(frame, Image.Image):
+            return frame.convert("RGB")
+
+        import numpy as np
+
+        if hasattr(frame, "detach"):
+            frame = frame.detach()
+        if hasattr(frame, "cpu"):
+            frame = frame.cpu()
+        if hasattr(frame, "numpy"):
+            frame = frame.numpy()
+
+        array = np.asarray(frame)
+        if array.ndim == 0:
+            raise ValueError("Video frame must be an image-like array")
+
+        if (
+            array.ndim == 3 and
+            array.shape[0] in (1, 3, 4) and
+            array.shape[-1] not in (1, 3, 4)
+        ):
+            array = np.moveaxis(array, 0, -1)
+
+        if np.issubdtype(array.dtype, np.floating):
+            array = np.nan_to_num(array, nan=0.0, posinf=255.0, neginf=0.0)
+            if array.size and array.min() >= 0.0 and array.max() <= 1.0:
+                array = array * 255.0
+            elif array.size and array.min() >= -1.0 and array.max() <= 1.0:
+                array = (array + 1.0) * 127.5
+            array = np.clip(array, 0, 255).astype(np.uint8)
+        elif array.dtype != np.uint8:
+            array = np.clip(array, 0, 255).astype(np.uint8)
+
+        if array.ndim == 2:
+            return Image.fromarray(array).convert("RGB")
+        if array.ndim == 3 and array.shape[-1] == 1:
+            return Image.fromarray(array[:, :, 0]).convert("RGB")
+        if array.ndim == 3 and array.shape[-1] in (3, 4):
+            return Image.fromarray(array).convert("RGB")
+
+        raise ValueError(f"Unsupported video frame shape: {array.shape}")
+
+    def _save_video_frames(self, frames, output_path: str, fps: int = 16) -> str:
+        """Save generated frames as an animated image with Pillow.
 
         Args:
             frames: Frames from diffusion pipeline (can be list, tensor, or nested structure)
-            output_path: Output video file path
+            output_path: Desired output path. The suffix is normalized to .gif.
             fps: Frames per second
+
+        Returns:
+            Path to the animated GIF that was written.
         """
         try:
-            # Try using diffusers export_to_video first (recommended for diffusers pipelines)
-            try:
-                from diffusers.utils import export_to_video
+            if fps <= 0:
+                raise ValueError("fps must be greater than 0")
 
-                # Handle nested frames structure (e.g., output.frames[0] for first video)
-                video_frames = frames
-                if hasattr(frames, '__len__') and len(frames) > 0:
-                    # Check if it's a nested structure like [[frame1, frame2, ...]]
-                    first_elem = frames[0]
-                    if hasattr(first_elem, '__len__') and not isinstance(first_elem, str):
-                        # It's nested, take the first video's frames
-                        if hasattr(first_elem, 'shape') or (hasattr(first_elem, '__len__') and len(first_elem) > 0):
-                            video_frames = first_elem
+            video_frames = self._normalize_video_frames(frames)
+            pil_frames = [self._frame_to_pil(frame) for frame in video_frames]
+            if not pil_frames:
+                raise ValueError("No video frames were provided")
 
-                export_to_video(video_frames, output_path, fps=fps)
-                logger.info(f"Saved video to {output_path} using diffusers export_to_video")
-                return
-            except ImportError:
-                logger.info("diffusers export_to_video not available, trying imageio")
-            except Exception as e:
-                logger.warning(f"diffusers export_to_video failed: {e}, trying imageio")
-
-            # Fallback to imageio
-            import numpy as np
-            try:
-                import imageio
-                writer = imageio.get_writer(output_path, fps=fps, codec='libx264')
-
-                # Handle nested frames
-                video_frames = frames
-                if hasattr(frames, '__len__') and len(frames) > 0:
-                    first_elem = frames[0]
-                    if hasattr(first_elem, '__len__') and not isinstance(first_elem, str):
-                        video_frames = first_elem
-
-                for frame in video_frames:
-                    if hasattr(frame, 'numpy'):
-                        frame = frame.numpy()
-                    elif hasattr(frame, '__array__'):
-                        frame = np.array(frame)
-                    writer.append_data(frame)
-                writer.close()
-                logger.info(f"Saved video with imageio to {output_path}")
-            except ImportError:
-                # Fallback to saving as GIF using PIL
-                video_frames = frames
-                if hasattr(frames, '__len__') and len(frames) > 0:
-                    first_elem = frames[0]
-                    if hasattr(first_elem, '__len__') and not isinstance(first_elem, str):
-                        video_frames = first_elem
-
-                if len(video_frames) > 0 and hasattr(video_frames[0], 'save'):
-                    video_frames[0].save(
-                        output_path.replace('.mp4', '.gif'),
-                        save_all=True,
-                        append_images=list(video_frames[1:]),
-                        duration=int(1000 / fps),
-                        loop=0
-                    )
-                    logger.info(f"Saved as GIF (imageio not available): {output_path}")
-
+            gif_path = str(Path(output_path).with_suffix(".gif"))
+            pil_frames[0].save(
+                gif_path,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=max(1, int(1000 / fps)),
+                loop=0,
+            )
+            logger.info(f"Saved generated animation to {gif_path} using Pillow")
+            return gif_path
         except Exception as e:
-            logger.error(f"Failed to save video: {e}")
+            logger.error(f"Failed to save generated animation: {e}")
             logger.error(traceback.format_exc())
+            raise
 
     def _categorize_media(self, media: List[str]) -> Tuple[List[str], List[str]]:
         """Categorize media files into images and videos
