@@ -1,17 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Admin blueprint for v2 API - documentation and utility endpoints."""
+"""Admin blueprint for v2 API - documentation, metrics, and utility endpoints."""
 
 import os
+import bson
 import shutil
 import logging
 from flask import Blueprint, jsonify, make_response, render_template, send_file
-from flask import current_app
+from flask import current_app, request
 
 from nvidia_tao_core.microservices.decorators import disk_space_check
-from .schemas import ErrorRsp
+from nvidia_tao_core.telemetry.processor import MetricProcessor
+from .schemas import ErrorRsp, TelemetryReq
 from nvidia_tao_core.microservices.config import get_tao_version
+from nvidia_tao_core.microservices.utils.stateless_handler_utils import set_metrics, get_metrics, get_root
+from nvidia_tao_core.microservices.utils.core_utils import safe_load_file
 
 TIMEOUT = 240
 logger = logging.getLogger(__name__)
@@ -36,7 +40,8 @@ def version_v2():
         'swagger',
         'version',
         'tao_api_notebooks.zip',
-        'orgs'
+        'orgs',
+        'metrics'
     ]))
 
 
@@ -116,3 +121,33 @@ def download_folder():
     # Return the zip file as a downloadable attachment
     return send_file("/tmp/tao_api_notebooks.zip", as_attachment=True,
                      download_name="tao_api_notebooks.zip", mimetype='application/zip')
+
+
+@admin_bp_v2.route('/metrics', methods=['POST'])
+def metrics_upsert():
+    """Report execution of new action."""
+    # Validate and load telemetry data
+    try:
+        raw_data = TelemetryReq().load(request.get_json(force=True))
+    except Exception as e:
+        logger.error("Exception thrown in metrics_upsert: %s", str(e))
+        return make_response(jsonify({}), 400)
+
+    # Load existing metrics
+    metrics = get_metrics()
+    if not metrics:
+        metrics = safe_load_file(os.path.join(get_root(), 'metrics.json'))
+        if not metrics:
+            # Warning: No historical metrics data found, starting with new record.
+            logger.warning("No existing metrics history found; starting new metrics record.")
+            metrics = {}  # Start a new, empty metrics dict
+
+    # Process metrics using the extensible MetricProcessor
+    # This orchestrator handles all metric building using configured builders
+    processor = MetricProcessor()
+    metrics = processor.process(metrics, raw_data)
+
+    # Persist metrics
+    set_metrics(metrics)
+
+    return make_response(bson.json_util.dumps(metrics), 201)

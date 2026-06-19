@@ -56,8 +56,4 @@ RUN python -c "import nvidia_tao_core; print('nvidia_tao_core is installed.')"
 # Microservices entrypoint
 ENV RUN_CLI=0
 
-CMD if [ "$RUN_CLI" = "1" ]; then \
-        /bin/bash; \
-    else \
-        /bin/bash $(get-microservice-script); \
-    fi
+CMD ["/bin/bash", "-lc", "if [ \"$RUN_CLI\" = \"1\" ]; then /bin/bash; else /bin/bash $(get-microservice-script); fi"]

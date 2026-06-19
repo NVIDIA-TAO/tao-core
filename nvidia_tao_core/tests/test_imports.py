@@ -68,7 +68,7 @@ def find_python_files(root_dir):
     exclude_dirs = {
         '__pycache__', '.git', '.pytest_cache', 'node_modules',
         'venv', 'env', '.venv', 'build', 'dist', '*.egg-info',
-        'release', 'ci', 'scripts'
+        'release', 'ci', 'telemetry_gateway', 'scripts'
     }
     exclude_files = {
         'test_imports.py', 'setup.py', 'conftest.py',
