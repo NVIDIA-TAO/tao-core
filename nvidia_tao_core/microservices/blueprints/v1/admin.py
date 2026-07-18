@@ -15,7 +15,11 @@ from .schemas import ErrorRsp, TelemetryReq
 from nvidia_tao_core.microservices.config import get_tao_version
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import set_metrics, get_metrics, get_root
 from nvidia_tao_core.microservices.utils.core_utils import safe_load_file
-from nvidia_tao_core.telemetry.processor import MetricProcessor
+
+try:
+    from nvidia_tao_core.telemetry.processor import MetricProcessor
+except ImportError:
+    MetricProcessor = None
 
 TIMEOUT = 240
 logger = logging.getLogger(__name__)
@@ -159,6 +163,9 @@ def metrics_upsert():
 
     # Process metrics using the extensible MetricProcessor
     # This orchestrator handles all metric building using configured builders
+    if MetricProcessor is None:
+        logger.warning("Telemetry processor not available; metrics endpoint is disabled.")
+        return make_response(jsonify({}), 501)
     processor = MetricProcessor()
     metrics = processor.process(metrics, raw_data)
 

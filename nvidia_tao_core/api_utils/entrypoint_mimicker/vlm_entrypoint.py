@@ -16,8 +16,14 @@ from contextlib import contextmanager
 from time import time
 import logging
 
-from nvidia_tao_core.telemetry.nvml import get_device_details
-from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
+try:
+    from nvidia_tao_core.telemetry.nvml import get_device_details
+    from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    get_device_details = None
+    send_telemetry_data = None
+    TELEMETRY_AVAILABLE = False
 
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -438,21 +444,24 @@ def vlm_launch(neural_network_name, action, specs, job_id=""):
     end = time()
     time_lapsed = int(end - start)
 
-    try:
-        gpu_data = []
-        for device in get_device_details():
-            gpu_data.append(device.get_config())
-        logging.info("Sending telemetry data.")
-        send_telemetry_data(
-            neural_network_name,
-            action,
-            gpu_data,
-            time_lapsed=time_lapsed,
-            pass_status=process_passed
-        )
-    except Exception as e:
-        logging.warning("Telemetry data couldn't be sent, but the command ran successfully.")
-        logging.warning(f"[Error]: {e}")
+    if not TELEMETRY_AVAILABLE:
+        logging.info("Telemetry module not available; skipping telemetry reporting.")
+    else:
+        try:
+            gpu_data = []
+            for device in get_device_details():
+                gpu_data.append(device.get_config())
+            logging.info("Sending telemetry data.")
+            send_telemetry_data(
+                neural_network_name,
+                action,
+                gpu_data,
+                time_lapsed=time_lapsed,
+                pass_status=process_passed
+            )
+        except Exception as e:
+            logging.warning("Telemetry data couldn't be sent, but the command ran successfully.")
+            logging.warning(f"[Error]: {e}")
 
     if not process_passed:
         logger.error("Execution status: FAIL")
