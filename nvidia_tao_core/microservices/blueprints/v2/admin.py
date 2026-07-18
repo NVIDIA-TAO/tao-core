@@ -11,7 +11,11 @@ from flask import Blueprint, jsonify, make_response, render_template, send_file
 from flask import current_app, request
 
 from nvidia_tao_core.microservices.decorators import disk_space_check
-from nvidia_tao_core.telemetry.processor import MetricProcessor
+
+try:
+    from nvidia_tao_core.telemetry.processor import MetricProcessor
+except ImportError:
+    MetricProcessor = None
 from .schemas import ErrorRsp, TelemetryReq
 from nvidia_tao_core.microservices.config import get_tao_version
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import set_metrics, get_metrics, get_root
@@ -144,6 +148,9 @@ def metrics_upsert():
 
     # Process metrics using the extensible MetricProcessor
     # This orchestrator handles all metric building using configured builders
+    if MetricProcessor is None:
+        logger.warning("Telemetry processor not available; metrics endpoint is disabled.")
+        return make_response(jsonify({}), 501)
     processor = MetricProcessor()
     metrics = processor.process(metrics, raw_data)
 

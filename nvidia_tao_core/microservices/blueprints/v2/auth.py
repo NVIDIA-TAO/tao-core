@@ -10,7 +10,12 @@ from flask import Blueprint, request, jsonify, make_response
 
 from nvidia_tao_core.microservices.decorators import disk_space_check
 from .schemas import LoginReq, LoginRsp, ErrorRsp
-from nvidia_tao_core.microservices.utils.auth_utils import credentials, authentication, access_control, metrics
+from nvidia_tao_core.microservices.utils.auth_utils import credentials, authentication, access_control
+
+try:
+    from nvidia_tao_core.microservices.utils.auth_utils import metrics
+except ImportError:
+    metrics = None
 from nvidia_tao_core.microservices.utils.mongo_utils import MongoHandler
 from nvidia_tao_core.microservices.constants import AIRGAP_DEFAULT_USER
 from nvidia_tao_core.microservices.utils.core_utils import log_monitor, DataMonitorLogTypeEnum
@@ -175,7 +180,7 @@ def auth():
                 # special metrics case
                 elif basic_auth.username == '$metricstoken' and url.split('/', 3)[-1] == 'api/v2/metrics':
                     key = basic_auth.password
-                    if metrics.validate(key):
+                    if metrics is not None and metrics.validate(key):
                         return make_response(jsonify({}), 200)
                     metadata = {"error_desc": "wrong metrics key", "error_code": 1}
                     schema = ErrorRsp()
