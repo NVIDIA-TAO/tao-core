@@ -660,8 +660,12 @@ class SlurmCloudStorageAdapter:
 
         if success:
             logger.info(f"Deleted folder: {full_path}")
-        else:
-            logger.error(f"Failed to delete folder {full_path}: {stderr}")
+            return True
+        logger.error(f"Failed to delete folder {full_path}: {stderr}")
+        raise RuntimeError(
+            f"Failed to delete folder {full_path}: "
+            f"{stderr or 'remote rm returned a non-zero status'}"
+        )
 
     @retry_on_connection_error(max_retries=2, initial_delay=3, backoff_factor=2)
     def delete_file(self, file_path):
@@ -672,8 +676,12 @@ class SlurmCloudStorageAdapter:
 
         if success:
             logger.info(f"Deleted file: {full_path}")
-        else:
-            logger.error(f"Failed to delete file {full_path}: {stderr}")
+            return True
+        logger.error(f"Failed to delete file {full_path}: {stderr}")
+        raise RuntimeError(
+            f"Failed to delete file {full_path}: "
+            f"{stderr or 'remote rm returned a non-zero status'}"
+        )
 
     @retry_on_connection_error(max_retries=5, initial_delay=30, backoff_factor=2)
     def move_file(self, source_path, destination_path):

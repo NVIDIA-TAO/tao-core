@@ -4,10 +4,12 @@
 """Util functions for AutoML jobs"""
 import logging
 import os
+from copy import deepcopy
 
 from .stateless_handler_utils import (
     get_public_experiments,
     get_handler_job_metadata,
+    get_handler_metadata,
     write_job_metadata,
     get_job_specs,
     get_job
@@ -160,17 +162,29 @@ def on_cancel_automl_job(job_id):
     )
 
     # Get workspace metadata to enable SLURM/Lepton job cancellation
-    from .stateless_handler_utils import get_handler_job_metadata, get_handler_metadata
     job_metadata = get_handler_job_metadata(job_id)
     workspace_metadata = {}
     if job_metadata:
-        handler_id = job_metadata.get('parent_id')  # AutoML brain job ID
-        if handler_id:
-            handler_metadata = get_handler_metadata(handler_id, kind='experiments')
+        # Child ``parent_id`` is the AutoML brain job ID, not the experiment ID.
+        # Prefer the child's durable handler_id and fall back through brain metadata.
+        experiment_id = job_metadata.get('handler_id') or job_metadata.get('experiment_id')
+        if not experiment_id:
+            brain_job_id = job_metadata.get('parent_id')
+            brain_metadata = get_handler_job_metadata(brain_job_id) if brain_job_id else {}
+            experiment_id = (
+                brain_metadata.get('experiment_id') or brain_metadata.get('handler_id')
+            )
+        if experiment_id:
+            handler_metadata = get_handler_metadata(experiment_id, kind='experiments')
             if handler_metadata:
                 workspace_id = handler_metadata.get('workspace')
                 if workspace_id:
                     workspace_metadata = get_handler_metadata(workspace_id, kind='workspaces')
+                    if workspace_metadata:
+                        from .handler_utils import decrypt_handler_metadata
+                        workspace_metadata = deepcopy(workspace_metadata)
+                        decrypt_handler_metadata(workspace_metadata)
+                        workspace_metadata.pop('_id', None)
 
     from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
     result = ExecutionHandler.delete_with_handler(job_id, workspace_metadata=workspace_metadata)
@@ -181,3 +195,56 @@ def on_cancel_automl_job(job_id):
         logger.error(f"Failed to delete StatefulSet for AutoML job {job_id}")
 
     return result
+
+
+def cancel_automl_child_job(job_id):
+    """Fence, dequeue, and confirm quiescence of one AutoML child.
+
+    The durable cancellation tombstone is written before the workflow queue or
+    backend is touched. A launcher already in ``submitting`` must finish its
+    pre/post-create handshake before this function can report quiescence.
+    """
+    from .stateless_handler_utils import (
+        get_automl_child_lifecycle,
+        request_automl_child_cancellation,
+        set_automl_child_launch_state,
+    )
+
+    if not request_automl_child_cancellation(job_id):
+        logger.error("Unable to persist AutoML cancellation intent for child %s", job_id)
+        return False
+
+    # Remove a not-yet-started job before checking platform state. The atomic
+    # launch claim also observes the tombstone, closing the dequeue/spawn race.
+    try:
+        on_delete_automl_job(job_id)
+    except Exception as err:
+        logger.error("Unable to dequeue AutoML child %s: %s", job_id, err)
+        return False
+
+    lifecycle = get_automl_child_lifecycle(job_id)
+    if lifecycle["launch_state"] == "quiescent":
+        return True
+
+    deletion_confirmed = on_cancel_automl_job(job_id) is True
+    lifecycle = get_automl_child_lifecycle(job_id)
+    if lifecycle["launch_state"] == "quiescent":
+        # The launcher may have observed the tombstone and completed its own
+        # exact post-create deletion while this cancellation attempt was in
+        # flight. Never overwrite that stronger acknowledgement with failure.
+        return True
+    if lifecycle["launch_state"] == "submitting":
+        logger.info(
+            "AutoML child %s is still inside its backend launch handshake", job_id
+        )
+        return False
+    if not deletion_confirmed:
+        set_automl_child_launch_state(
+            job_id, "cancel_failed", "backend quiescence was not confirmed"
+        )
+        return False
+
+    if not set_automl_child_launch_state(job_id, "quiescent"):
+        logger.error("Unable to persist quiescent state for AutoML child %s", job_id)
+        return False
+    return True

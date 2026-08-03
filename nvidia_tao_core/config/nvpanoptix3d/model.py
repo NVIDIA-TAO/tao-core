@@ -356,6 +356,18 @@ class Projection:
 class NVPanoptix3DModelConfig:
     """NVPanoptix3D model config."""
 
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Deterministic MSDeformAttn",
+        description=(
+            "When True, route MultiScaleDeformableAttention through the deterministic "
+            "pure-PyTorch implementation instead of the custom CUDA op, whose atomicAdd "
+            "backward has no deterministic kernel. Combined with train.cudnn.deterministic "
+            "this yields reproducible training, at some speed/memory cost. Default False "
+            "(fused CUDA op, current behavior)."
+        ),
+    )
     backbone: Backbone = DATACLASS_FIELD(
         Backbone(),
         description="Configuration hyper parameters for the NVPanoptix3D Backbone.",

@@ -253,7 +253,17 @@ def dependency_check_automl(job_context, dependency):
     if not recs_dict:
         return False, f"Automl controller for brain job id {automl_brain_job_id} not found yet"
     try:
-        recs_dict[rec_number]
+        recommendation = recs_dict[rec_number]
+        child_metadata = get_handler_job_metadata(str(job_context.id)) or {}
+        parent_metadata = get_handler_job_metadata(automl_brain_job_id) or {}
+        if (
+            child_metadata.get("automl_cancel_requested") is True or
+            str(recommendation.get("status", "")).lower() in ("canceled", "canceling") or
+            str(parent_metadata.get("status", "")).lower() in (
+                "canceled", "canceling", "paused", "pausing"
+            )
+        ):
+            return False, "AutoML recommendation cancellation has been requested"
         return True, ""
     except Exception as e:
         logger.error("Exception thrown in dependency_check_automl: %s", str(e))
