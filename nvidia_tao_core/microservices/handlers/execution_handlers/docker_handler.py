@@ -7,6 +7,7 @@
 
 import logging
 import os
+import re
 import time
 import requests
 import subprocess
@@ -39,6 +40,115 @@ logger = logging.getLogger(__name__)
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "tao_default")
 DOCKER_USERNAME = os.getenv("DOCKER_USERNAME", "$oauthtoken")
 docker_client = docker.from_env() if os.getenv("DOCKER_HOST") else None
+
+_DOCKER_SOCKET_PATH = "/var/run/docker.sock"
+_CONTAINER_USER_ENV = "TAO_DOCKER_CONTAINER_USER"
+_CONTAINER_GROUPS_ENV = "TAO_DOCKER_GROUP_ADD"
+
+
+def _read_only_volume_mode(mode):
+    """Return whether a Docker volume mode explicitly makes the mount read-only."""
+    return "ro" in {
+        token.strip().lower() for token in str(mode or "rw").split(",")
+    }
+
+
+def _writable_bind_mounts(volumes):
+    """Normalize writable volume specs to ``(source, target, mode)`` tuples.
+
+    Docker accepts both ``{"/host": {"bind": "/container", "mode": "rw"}}``
+    and CLI-like ``["/host:/container:rw"]`` forms. The Docker socket is a
+    control-plane mount, not a training-output path, and must not force a
+    workload user override.
+    """
+    normalized = []
+    if not volumes:
+        return normalized
+
+    if isinstance(volumes, dict):
+        entries = []
+        for source, details in volumes.items():
+            if isinstance(details, dict):
+                target = details.get("bind", "")
+                if "ro" in details and "mode" in details:
+                    raise ValueError(
+                        f'Docker volume cannot contain both "ro" and "mode": {details!r}'
+                    )
+                if "ro" in details:
+                    mode = "ro" if details["ro"] else "rw"
+                else:
+                    mode = details.get("mode", "rw")
+                propagation = details.get("propagation")
+                if propagation:
+                    mode = f"{mode},{propagation}" if mode else str(propagation)
+            else:
+                target = details
+                mode = "rw"
+            entries.append((source, target, mode))
+    else:
+        entries = []
+        for volume in volumes:
+            parts = str(volume).split(":")
+            if len(parts) == 1:
+                # A single container path asks Docker for an anonymous volume;
+                # it is not a host bind and carries no host-ownership contract.
+                continue
+            source, target = parts[0], parts[1]
+            mode = parts[2] if len(parts) > 2 else "rw"
+            entries.append((source, target, mode))
+
+    seen = set()
+    for source, target, mode in entries:
+        source = str(source or "").strip()
+        target = str(target or "").strip()
+        # Read-only and control-plane mounts do not create host output. Leave
+        # their full validation to Docker so this ownership guard does not
+        # reject otherwise-supported legacy specifications.
+        if _read_only_volume_mode(mode):
+            continue
+        if _DOCKER_SOCKET_PATH in (source, target):
+            continue
+        if not source or not target.startswith("/") or target == "/":
+            raise ValueError(
+                f"Docker writable bind requires a source and non-root absolute target: "
+                f"{source!r}:{target!r}"
+            )
+        mount = (source, target, str(mode or "rw"))
+        if mount not in seen:
+            normalized.append(mount)
+            seen.add(mount)
+    return normalized
+
+
+def _configured_container_identity():
+    """Return the explicitly configured host submitting identity and groups.
+
+    TAO Core often talks to the host daemon from inside a service container, so
+    its own ``os.getuid()`` is not evidence of the host user's identity. Never
+    infer the user from a bind directory owner either: shared roots are commonly
+    owned by ``root:<group>`` or by another group member.
+    """
+    raw_user = os.getenv(_CONTAINER_USER_ENV, "").strip()
+    match = re.fullmatch(r"(\d+):(\d+)", raw_user)
+    if not match or int(match.group(1)) == 0:
+        raise RuntimeError(
+            f"Writable Docker output binds require {_CONTAINER_USER_ENV}=UID:GID "
+            "for the verified non-root host submitting user"
+        )
+    uid, gid = match.groups()
+
+    raw_groups = os.getenv(_CONTAINER_GROUPS_ENV, "").strip()
+    groups = []
+    if raw_groups:
+        for token in re.split(r"[\s,]+", raw_groups):
+            if not token or not token.isdigit():
+                raise RuntimeError(
+                    f"{_CONTAINER_GROUPS_ENV} must be a comma-separated list of "
+                    "numeric supplementary GIDs"
+                )
+            if token != gid and token not in groups:
+                groups.append(token)
+    return f"{uid}:{gid}", groups
 
 
 def is_tegra_platform():
@@ -192,6 +302,164 @@ class DockerHandler(ExecutionHandler):
                 logger.error(f"Error logging in to NGC registry {self._docker_registry}: {e}")
         return None
 
+    def _preflight_writable_bind(
+        self, source, mode, container_user, group_add, prepare_home=False
+    ):
+        """Prove the configured identity can create and delete through one bind.
+
+        The probe runs through the same Docker daemon as the workload. This is
+        required when TAO Core itself is containerized or uses a remote daemon,
+        where client-side filesystem ownership and ``os.access`` checks describe
+        the wrong host.
+        """
+        directory_commands = [
+            "umask 077",
+            "probe=/ownership-probe/.tao-write-delete-probe-$$",
+            # mkdir is an atomic no-follow create. It proves create/delete
+            # permission without following a pre-planted file symlink.
+            'mkdir "$probe"',
+            'rmdir "$probe"',
+        ]
+        if prepare_home:
+            directory_commands.extend([
+                "runtime=/ownership-probe/.tao-runtime",
+                'home="$runtime/home"',
+                'cache="$home/.cache"',
+                "for path in \"$runtime\" \"$home\" \"$cache\" "
+                "\"$cache/huggingface\" \"$cache/torch\" \"$cache/triton\" "
+                "\"$cache/torchinductor\" \"$cache/matplotlib\" "
+                "\"$home/.config\" \"$home/.local\"; do "
+                "test ! -L \"$path\"; done",
+                "mkdir -p \"$cache/huggingface\" \"$cache/torch\" "
+                "\"$cache/triton\" \"$cache/torchinductor\" "
+                "\"$cache/matplotlib\" \"$home/.config\" \"$home/.local\"",
+                "for path in \"$runtime\" \"$home\" \"$cache\" "
+                "\"$cache/huggingface\" \"$cache/torch\" \"$cache/triton\" "
+                "\"$cache/torchinductor\" \"$cache/matplotlib\" "
+                "\"$home/.config\" \"$home/.local\"; do "
+                "test -d \"$path\"; test ! -L \"$path\"; chmod 700 \"$path\"; done",
+            ])
+        file_commands = ["exit 1"] if prepare_home else ["test -w /ownership-probe"]
+        script = "\n".join([
+            "set -eu",
+            "if [ -d /ownership-probe ]; then",
+            *(f"  {command}" for command in directory_commands),
+            "elif [ -f /ownership-probe ]; then",
+            *(f"  {command}" for command in file_commands),
+            "else",
+            "  exit 1",
+            "fi",
+        ])
+        try:
+            self._docker_client.containers.run(
+                image=self._docker_image,
+                entrypoint="/bin/sh",
+                command=["-c", script],
+                user=container_user,
+                group_add=group_add or None,
+                # Preserve SELinux relabel and bind-propagation options so the
+                # proof exercises the same host access path as the workload.
+                volumes={source: {"bind": "/ownership-probe", "mode": mode}},
+                working_dir="/",
+                network_disabled=True,
+                remove=True,
+            )
+        except Exception as exc:
+            raise PermissionError(
+                f"Configured Docker identity {container_user} could not create and "
+                f"delete files through writable bind {source!r}; repair access or "
+                f"correct {_CONTAINER_USER_ENV}/{_CONTAINER_GROUPS_ENV} before launch"
+            ) from exc
+
+    def _assert_host_identity_mapping_supported(self):
+        """Reject daemons whose user namespace obscures host UID/GID ownership."""
+        try:
+            daemon_info = self._docker_client.info()
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not verify Docker daemon identity-mapping mode; refusing "
+                "a writable /results launch"
+            ) from exc
+        if not isinstance(daemon_info, dict):
+            raise RuntimeError(
+                "Docker daemon returned unverifiable identity-mapping metadata; "
+                "refusing a writable /results launch"
+            )
+
+        security_options = {
+            str(option).strip().lower()
+            for option in daemon_info.get("SecurityOptions", []) or []
+        }
+        remapped = bool(daemon_info.get("Rootless")) or any(
+            option == "name=rootless" or
+            option.startswith("name=userns") or
+            option.startswith("userns")
+            for option in security_options
+        )
+        if remapped:
+            raise RuntimeError(
+                "Writable /results ownership cannot be guaranteed with a "
+                "rootless or userns-remapped Docker daemon"
+            )
+
+    def _prepare_writable_bind_runtime(
+        self,
+        volumes,
+        writable_mounts=None,
+        configured_identity=None,
+        identity_mapping_verified=False,
+    ):
+        """Validate writable binds and return Docker user/environment overrides."""
+        if writable_mounts is None:
+            writable_mounts = _writable_bind_mounts(volumes)
+        results_mount = next(
+            (
+                mount for mount in writable_mounts
+                if mount[1].rstrip("/") == "/results"
+            ),
+            None,
+        )
+        # This ownership contract is deliberately scoped to TAO output binds.
+        # Anonymous volumes and unrelated writable file/config mounts retain
+        # their existing Docker semantics and never become a runtime HOME.
+        if results_mount is None:
+            return None
+
+        if not identity_mapping_verified:
+            self._assert_host_identity_mapping_supported()
+        container_user, group_add = configured_identity or _configured_container_identity()
+        home_source, home_target, _ = results_mount
+        prepared_sources = set()
+        for source, _target, mode in writable_mounts:
+            if source in prepared_sources:
+                continue
+            self._preflight_writable_bind(
+                source,
+                mode,
+                container_user,
+                group_add,
+                prepare_home=source == home_source,
+            )
+            prepared_sources.add(source)
+
+        home = f"{home_target.rstrip('/')}/.tao-runtime/home"
+        uid = container_user.split(":", 1)[0]
+        environment = {
+            "HOME": home,
+            # Numeric identities need not have a matching /etc/passwd entry in
+            # the image. Numeric USER/LOGNAME values accurately describe that
+            # situation while HOME keeps libraries away from /root.
+            "USER": uid,
+            "LOGNAME": uid,
+            "XDG_CACHE_HOME": f"{home}/.cache",
+            "HF_HOME": f"{home}/.cache/huggingface",
+            "TORCH_HOME": f"{home}/.cache/torch",
+            "TRITON_CACHE_DIR": f"{home}/.cache/triton",
+            "TORCHINDUCTOR_CACHE_DIR": f"{home}/.cache/torchinductor",
+            "MPLCONFIGDIR": f"{home}/.cache/matplotlib",
+        }
+        return container_user, group_add, environment
+
     @staticmethod
     def get_handler_for_container(container_name=None):
         """Initialize a docker handler from a container."""
@@ -205,6 +473,20 @@ class DockerHandler(ExecutionHandler):
             image_ref = container.image.tags[0] if container.image.tags else container.image.id
             logger.info(f"Found container image {image_ref} for {container_name}")
             return DockerHandler(image_ref, container=container)
+        except docker.errors.NotFound:
+            # Preserve the distinction between a definitive 404 and a daemon/
+            # transport error. Only the former is a quiescence observation.
+            handler = object.__new__(DockerHandler)
+            ExecutionHandler.__init__(handler, backend_type=Backend.LOCAL_DOCKER)
+            handler._docker_client = docker_client
+            handler._api_client = docker_client.api
+            handler._container = None
+            handler._docker_image = None
+            handler._docker_registry = None
+            handler._image_name = None
+            handler._docker_tag = None
+            handler._container_absence_confirmed = True
+            return handler
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"Error getting handler for container {container_name}: {e}")
@@ -377,10 +659,32 @@ class DockerHandler(ExecutionHandler):
             command: Command to run in the container
             num_gpus: Number of GPUs to assign (-1 for all)
             volumes: Volume mounts for the container
+
+                Writable ``/results`` mounts are a fail-closed integration contract: the
+                service must provide the verified host submitter identity in
+                ``TAO_DOCKER_CONTAINER_USER`` (and supplementary numeric GIDs
+                in ``TAO_DOCKER_GROUP_ADD`` when needed). Callers must never
+                derive those values from a bind directory owner. Read-only and
+                Docker-socket-only launches preserve the image's default user.
         """
         try:
             # Use container_name as job_id for status updates
             job_id = container_name if container_name else None
+
+            # Parse and validate the trusted host identity before an image pull
+            # can consume more disk. The daemon-side write/delete proof still
+            # runs after the requested workload image is locally available.
+            writable_mounts = _writable_bind_mounts(volumes)
+            has_results_bind = any(
+                target.rstrip("/") == "/results"
+                for _source, target, _mode in writable_mounts
+            )
+            configured_identity = None
+            identity_mapping_verified = False
+            if has_results_bind:
+                configured_identity = _configured_container_identity()
+                self._assert_host_identity_mapping_supported()
+                identity_mapping_verified = True
 
             # Update status: checking if image exists
             if job_id:
@@ -401,6 +705,20 @@ class DockerHandler(ExecutionHandler):
                 # Image already exists locally
                 if job_id:
                     self.update_image_pull_status(job_id, self._docker_image, "already_exists")
+
+            bind_runtime = self._prepare_writable_bind_runtime(
+                volumes,
+                writable_mounts=writable_mounts,
+                configured_identity=configured_identity,
+                identity_mapping_verified=identity_mapping_verified,
+            )
+            effective_env = dict(docker_env_vars or {})
+            if bind_runtime:
+                container_user, supplementary_groups, ownership_env = bind_runtime
+                # The ownership redirects are invariants for writable host
+                # output mounts, so per-job environment values cannot point
+                # HOME or framework caches back into image-owned locations.
+                effective_env.update(ownership_env)
 
             # Check for pre-assigned GPUs in three places (in order of priority):
             # 1. Passed directly as parameter
@@ -477,26 +795,27 @@ class DockerHandler(ExecutionHandler):
                 "tmpfs": {"/dev/shm": ""},
                 "detach": True,
                 "remove": True,
-                "environment": docker_env_vars,
+                "environment": effective_env,
                 "volumes": volumes,
             }
+            if bind_runtime:
+                run_kwargs["user"] = container_user
+                if supplementary_groups:
+                    run_kwargs["group_add"] = supplementary_groups
 
             if use_runtime:
                 # Method 1: Use runtime="nvidia" (for Tegra/Jetson and nvidia-docker2)
                 # This matches the tao_pt.py runner behavior:
                 # --runtime=nvidia -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=<gpus>
-                docker_env_vars = docker_env_vars.copy()
-                docker_env_vars["NVIDIA_DRIVER_CAPABILITIES"] = "all"
+                effective_env["NVIDIA_DRIVER_CAPABILITIES"] = "all"
                 if gpu_ids:
-                    docker_env_vars["NVIDIA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
+                    effective_env["NVIDIA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
                     logger.info(f"Using runtime='nvidia' with GPUs: {','.join(gpu_ids)}")
                 else:
-                    docker_env_vars["NVIDIA_VISIBLE_DEVICES"] = "all"
+                    effective_env["NVIDIA_VISIBLE_DEVICES"] = "all"
                     logger.info("Using runtime='nvidia' with all available GPUs")
 
                 run_kwargs["runtime"] = "nvidia"
-                docker_env_vars = docker_env_vars.copy()
-                docker_env_vars["NVIDIA_DRIVER_CAPABILITIES"] = "all"
             else:
                 # Method 2: Use device_requests (for standard Docker with nvidia-container-toolkit)
                 device_requests = self.get_device_requests(gpu_ids)
@@ -673,13 +992,28 @@ class DockerHandler(ExecutionHandler):
         Args:
             job_id: Job/microservice identifier
         """
-        if BACKEND == Backend.LOCAL_DOCKER:
-            from nvidia_tao_core.microservices.utils.job_utils.gpu_manager import gpu_manager
+        if getattr(self, "_container_absence_confirmed", False):
+            return True
+        if not self._container:
+            self.logger.error("No confirmed Docker container state for %s", job_id)
+            return False
+        try:
             self.stop_container()
-            gpu_manager.release_gpus(job_id)
+            try:
+                self._container.reload()
+                if self._container.status == "running":
+                    self.logger.error("Docker container %s is still running", job_id)
+                    return False
+            except docker.errors.NotFound:
+                pass
+            if BACKEND == Backend.LOCAL_DOCKER:
+                from nvidia_tao_core.microservices.utils.job_utils.gpu_manager import gpu_manager
+                gpu_manager.release_gpus(job_id)
             self.logger.info(f"Deleted Docker microservice {job_id}")
-        else:
-            self.stop_container()
+            return True
+        except Exception as err:
+            self.logger.error("Failed to stop Docker microservice %s: %s", job_id, err)
+            return False
 
     def get_job_status(self, job_id, **kwargs):
         """Get job status - unified interface for ExecutionHandler
@@ -728,8 +1062,9 @@ class DockerHandler(ExecutionHandler):
         if self._container:
             logger.info(f"Stopping container: {self._container.name}")
             self._container.stop()
-        else:
-            logger.error("No container to stop")
+            return True
+        logger.error("No container to stop")
+        return False
 
     def wait_for_container(self, job_id, port=8000):
         """Wait for the container to be ready."""

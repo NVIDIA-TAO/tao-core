@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import sysconfig
 import logging
+import time
 
 from nvidia_tao_core.microservices.utils.automl_utils import update_automl_details_metadata
 from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
@@ -21,14 +22,18 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     serialize_object,
     write_job_metadata,
     get_handler_job_metadata,
+    get_automl_child_job_ids,
+    request_automl_child_cancellation,
     update_handler_with_jobs_info,
-    get_automl_controller_info
+    get_automl_controller_info,
+    set_automl_checkpoint_cleanup_state,
 )
 from nvidia_tao_core.microservices.enum_constants import Backend
 from nvidia_tao_core.microservices.utils.handler_utils import Code, decrypt_handler_metadata
 from .docker_images import DOCKER_IMAGE_MAPPER
 from nvidia_tao_core.microservices.handlers.execution_handlers.execution_handler import ExecutionHandler
 from nvidia_tao_core.microservices.utils.log_monitor_service import start_monitoring_job, stop_monitoring_job
+from nvidia_tao_core.microservices.utils.automl_job_utils import cancel_automl_child_job
 
 # TODO Make sure the image name is current docker tag of the API
 image = DOCKER_IMAGE_MAPPER["API"]
@@ -276,7 +281,7 @@ class AutoMLHandler:
             logger.debug(f"[AUTOML] Skipping log monitoring for backend {backend}")
 
     @staticmethod
-    def stop(user_id, org_name, experiment_id, job_id):
+    def stop(user_id, org_name, experiment_id, job_id, cleanup_checkpoints=True):
         """Stops a running AutoML job and cancels any active recommendations.
 
         Args:
@@ -294,124 +299,91 @@ class AutoMLHandler:
         )
 
         try:
-            logger.debug(f"[AUTOML-STOP] Deleting AutoML brain K8s job: job_id={job_id}")
+            recommendations = get_automl_controller_info(job_id) or []
+            child_job_ids = {
+                recommendation.get("job_id")
+                for recommendation in recommendations
+                if recommendation.get("job_id")
+            }
+            child_job_ids.update(get_automl_child_job_ids(job_id))
 
-            # Stop log monitoring for brain job
-            logger.debug(f"[AUTOML] Stopping brain job {job_id}, checking if should stop log monitoring")
+            for recommendation in recommendations:
+                status = str(recommendation.get("status", "")).lower()
+                if status not in ("done", "success", "failure", "error", "canceled"):
+                    recommendation["status"] = "canceling"
+            if recommendations:
+                save_automl_controller_info(job_id, recommendations)
+                update_automl_details_metadata(job_id, experiment_id, "experiments")
+
+            cancellation_intents_persisted = all(
+                request_automl_child_cancellation(child_job_id)
+                for child_job_id in sorted(child_job_ids)
+            )
+            if not cancellation_intents_persisted:
+                return Code(409, [], "child cancellation intent could not be persisted")
+
+            if cleanup_checkpoints and not set_automl_checkpoint_cleanup_state(
+                job_id, "pending"
+            ):
+                return Code(409, [], "checkpoint cleanup intent could not be persisted")
+
+            timeout_seconds = int(os.getenv("AUTOML_CANCEL_TIMEOUT_SECONDS", "180"))
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                child_results = [
+                    cancel_automl_child_job(child_job_id) is True
+                    for child_job_id in sorted(child_job_ids)
+                ]
+                children_quiescent = all(child_results)
+                cleanup_complete = not cleanup_checkpoints
+                if cleanup_checkpoints:
+                    metadata = get_handler_job_metadata(job_id) or {}
+                    cleanup_complete = (
+                        metadata.get("checkpoint_cleanup_pending") is False and
+                        metadata.get("checkpoint_cleanup_status") in ("complete", "skipped")
+                    )
+
+                if children_quiescent and cleanup_complete:
+                    break
+                if time.monotonic() >= deadline:
+                    logger.error(
+                        "AutoML cancellation barrier timed out for %s "
+                        "(children_quiescent=%s, cleanup_complete=%s)",
+                        job_id, children_quiescent, cleanup_complete,
+                    )
+                    return Code(
+                        409,
+                        {"message": f"job {job_id} remains Canceling"},
+                        "child quiescence or checkpoint cleanup is still pending",
+                    )
+                time.sleep(1)
+
+            latest_recommendations = get_automl_controller_info(job_id) or recommendations
+            for recommendation in latest_recommendations:
+                status = str(recommendation.get("status", "")).lower()
+                if status not in ("done", "success", "failure", "error", "canceled"):
+                    recommendation["status"] = "canceled"
+            if latest_recommendations:
+                save_automl_controller_info(job_id, latest_recommendations)
+                update_automl_details_metadata(job_id, experiment_id, "experiments")
+
+            # The brain remains alive until it has acknowledged durable cleanup.
+            if ExecutionHandler.delete_job_with_handler(job_id) is not True:
+                return Code(409, [], "AutoML brain termination was not accepted")
+            handler = ExecutionHandler.create_handler(backend=BACKEND, job_id=job_id)
+            if not handler or not handler.wait_for_job_termination(
+                job_id, timeout_seconds=120
+            ):
+                return Code(409, [], "AutoML brain termination was not confirmed")
+
             if BACKEND in (Backend.LOCAL_K8S, Backend.LOCAL_DOCKER):
                 try:
-                    logger.info(f"[AUTOML] Stopping log monitoring for AutoML brain job {job_id}")
                     stop_monitoring_job(job_id)
-                    logger.info(f"[AUTOML] Successfully stopped log monitoring for AutoML brain job {job_id}")
-                except Exception as e:
+                except Exception as err:
                     logger.warning(
-                        f"[AUTOML] Failed to stop log monitoring for AutoML brain job {job_id}: "
-                        f"{type(e).__name__}: {e}"
+                        "Failed to stop log monitoring for AutoML brain %s: %s",
+                        job_id, err,
                     )
-
-            ExecutionHandler.delete_job_with_handler(job_id)
-            logger.debug(f"[AUTOML-STOP] Brain K8s job deleted, waiting for pod termination: job_id={job_id}")
-
-            # Wait for actual K8s Job/Pod to terminate (synchronous)
-            handler = ExecutionHandler.create_handler(backend=BACKEND, job_id=job_id)
-            job_terminated = handler.wait_for_job_termination(job_id, timeout_seconds=120) if handler else False
-            if not job_terminated:
-                logger.warning(f"[AUTOML-STOP] Timeout waiting for brain termination: job_id={job_id}")
-            else:
-                logger.debug(f"[AUTOML-STOP] Brain termination confirmed: job_id={job_id}")
-
-            recommendations = get_automl_controller_info(job_id)
-            logger.debug(
-                f"[AUTOML-STOP] Retrieved recommendations: job_id={job_id}, "
-                f"num_recommendations={len(recommendations) if recommendations else 0}"
-            )
-            for idx, recommendation in enumerate(recommendations):
-                recommendation_job_id = recommendation.get("job_id")
-                rec_status = recommendation.get("status")
-                logger.debug(
-                    f"[AUTOML-STOP] Processing recommendation {idx}: "
-                    f"rec_job_id={recommendation_job_id}, status={rec_status}"
-                )
-
-                # Update status to canceling for all non-terminal states
-                if rec_status not in ("done", "success", "failure", "error", "canceled", "canceling"):
-                    logger.debug(
-                        f"[AUTOML-STOP] Updating recommendation status to canceling: "
-                        f"rec_job_id={recommendation_job_id}, old_status={rec_status}"
-                    )
-                    recommendation["status"] = "canceling"
-                    save_automl_controller_info(job_id, recommendations)
-                    logger.debug(f"[AUTOML-STOP] Saved controller info to MongoDB: job_id={job_id}")
-                    # Verify the save worked
-                    verification = get_automl_controller_info(job_id)
-                    verified_status = (
-                        verification[idx]["status"]
-                        if verification and idx < len(verification) else "NOT_FOUND"
-                    )
-                    logger.debug(
-                        f"[AUTOML-STOP] Verified status in MongoDB: "
-                        f"rec_job_id={recommendation_job_id}, status={verified_status}"
-                    )
-                    update_automl_details_metadata(job_id, experiment_id, "experiments")
-
-                if recommendation_job_id:
-                    logger.debug(
-                        f"[AUTOML-STOP] Deleting recommendation statefulset: "
-                        f"rec_job_id={recommendation_job_id}"
-                    )
-                    ExecutionHandler.delete_with_handler(recommendation_job_id)
-                    logger.debug(
-                        f"[AUTOML-STOP] Waiting for recommendation pod termination: "
-                        f"rec_job_id={recommendation_job_id}"
-                    )
-
-                    rec_handler = ExecutionHandler.create_handler(
-                        backend=BACKEND, job_id=recommendation_job_id
-                    )
-                    job_terminated = (
-                        rec_handler.wait_for_termination(recommendation_job_id, timeout_seconds=120)
-                        if rec_handler else False
-                    )
-                    if not job_terminated:
-                        logger.warning(
-                            f"[AUTOML-STOP] Timeout waiting for recommendation termination: "
-                            f"rec_job_id={recommendation_job_id}"
-                        )
-                    else:
-                        logger.debug(
-                            f"[AUTOML-STOP] Recommendation termination confirmed: "
-                            f"rec_job_id={recommendation_job_id}"
-                        )
-
-                # Update ALL non-terminal recommendations to canceled (check current status after potential updates)
-                current_status = recommendation.get("status")
-                if current_status not in ("done", "success", "failure", "error", "canceled"):
-                    logger.debug(
-                        f"[AUTOML-STOP] Updating recommendation status to canceled: "
-                        f"rec_job_id={recommendation_job_id}, old_status={current_status}"
-                    )
-                    recommendation["status"] = "canceled"
-                    save_automl_controller_info(job_id, recommendations)
-                    logger.debug(f"[AUTOML-STOP] Saved controller info to MongoDB: job_id={job_id}")
-                    # Verify the save worked
-                    verification = get_automl_controller_info(job_id)
-                    verified_status = (
-                        verification[idx]["status"]
-                        if verification and idx < len(verification) else "NOT_FOUND"
-                    )
-                    logger.debug(
-                        f"[AUTOML-STOP] Verified final status in MongoDB: "
-                        f"rec_job_id={recommendation_job_id}, status={verified_status}"
-                    )
-                    update_automl_details_metadata(job_id, experiment_id, "experiments")
-                else:
-                    logger.debug(
-                        f"[AUTOML-STOP] Skipping status update for terminal state: "
-                        f"rec_job_id={recommendation_job_id}, status={current_status}"
-                    )
-            logger.debug(
-                f"[AUTOML-STOP] AutoML stop operation completed successfully: job_id={job_id}"
-            )
         except Exception as e:
             logger.error(f"[AUTOML-STOP] Exception thrown in AutoMLHandler stop: job_id={job_id}, error={str(e)}")
             logger.error(f"[AUTOML-STOP] Traceback: {traceback.format_exc()}")

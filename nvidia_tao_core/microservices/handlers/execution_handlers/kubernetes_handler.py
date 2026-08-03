@@ -479,10 +479,36 @@ class KubernetesHandler(ExecutionHandler):
         """
         try:
             resource_type = kwargs.get("resource_type", "multinode")
-            self.delete_statefulset(job_id, use_ngc=False, resource_type=resource_type)
+            deleted = self.delete_statefulset(
+                job_id, use_ngc=False, resource_type=resource_type
+            )
+            if deleted is False:
+                return False
+
+            # Foreground deletion is asynchronous at the Kubernetes API
+            # boundary. Confirm that no labeled pod remains before callers
+            # remove bind-mounted checkpoints.
+            core_api = client.CoreV1Api()
+            namespace = self.get_namespace()
+            deadline = time.monotonic() + 30
+            while True:
+                pods = core_api.list_namespaced_pod(
+                    namespace=namespace,
+                    label_selector=f"job-id={job_id}",
+                ).items
+                if not pods:
+                    break
+                if time.monotonic() >= deadline:
+                    self.logger.error(
+                        "Timed out waiting for pods of %s to terminate", job_id
+                    )
+                    return False
+                time.sleep(0.5)
             self.logger.info(f"Deleted K8s microservice {job_id}")
+            return True
         except Exception as e:
             self.logger.error(f"Failed to delete K8s microservice: {e}")
+            return False
 
     def _get_pod_image_pull_status(self, pod_name, namespace):
         """Get the image pull status from a pod's events and container statuses.
