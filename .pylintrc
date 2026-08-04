@@ -54,6 +54,13 @@ extension-pkg-whitelist=
 confidence=
 
 # List of tests to be disabled.
+#
+# broad-exception-raised is disabled to match the policy this project has always
+# been linted under. The GitLab copy of this file leaves overgeneral-exceptions
+# unqualified ('Exception' rather than 'builtins.Exception'), which pylint
+# cannot match against, so the check has never fired there. Qualifying the name
+# here turned it on and flagged 17 pre-existing `raise Exception(...)` sites.
+# Narrow those raises and this line can go.
 disable=import-error,import-outside-toplevel,no-name-in-module,method-hidden,
        access-member-before-definition,attribute-defined-outside-init,interface-is-not-class,
        missing-interface-method,arguments-differ,signature-differs,abstract-method,
@@ -73,7 +80,8 @@ disable=import-error,import-outside-toplevel,no-name-in-module,method-hidden,
        wrong-import-position,unreachable,logging-format-interpolation,unused-format-string-argument,
        not-callable,too-many-function-args,unnecessary-lambda,len-as-condition,wrong-import-order,
        import-self,dangerous-default-value,logging-fstring-interpolation,unsubscriptable-object,
-       too-many-positional-arguments,too-many-return-statements,c-extension-no-member
+       too-many-positional-arguments,too-many-return-statements,c-extension-no-member,
+       broad-exception-raised
 
 # Python 2/3 compatibility flags.
 enable=assert-on-tuple,return-in-init,return-outside-function
