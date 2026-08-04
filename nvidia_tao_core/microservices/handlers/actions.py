@@ -47,7 +47,11 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     get_automl_brain_info,
     get_automl_best_rec_info,
     get_automl_controller_info,
+    claim_automl_child_launch,
+    claim_automl_child_relaunch,
+    get_automl_child_lifecycle,
     save_automl_controller_info,
+    set_automl_child_launch_state,
     get_dnn_status,
     update_job_metadata,
     update_job_status,
@@ -1247,6 +1251,37 @@ class AutoMLPipeline(ActionPipeline):
                 break
         return rec_number
 
+    def _cancellation_requested(self):
+        """Check the durable parent/child cancellation fences."""
+        lifecycle = get_automl_child_lifecycle(self.job_name)
+        if lifecycle["cancel_requested"]:
+            return True
+        parent_metadata = get_handler_job_metadata(self.automl_brain_job_id) or {}
+        if str(parent_metadata.get("status", "")).lower() in (
+            "canceled", "canceling", "paused", "pausing"
+        ):
+            return True
+        recommendations = get_automl_controller_info(self.automl_brain_job_id) or []
+        if self.rec_number is None or self.rec_number >= len(recommendations):
+            return True
+        return str(recommendations[self.rec_number].get("status", "")).lower() in (
+            "canceled", "canceling"
+        )
+
+    def _finish_canceled_launch(self, backend_may_exist=False):
+        """Abort a fenced launch and persist quiescence only after confirmation."""
+        if not backend_may_exist:
+            return set_automl_child_launch_state(self.job_name, "quiescent")
+        deleted = ExecutionHandler.delete_with_handler(
+            self.job_name, workspace_metadata=self.workspace_metadata
+        )
+        if deleted is True:
+            return set_automl_child_launch_state(self.job_name, "quiescent")
+        set_automl_child_launch_state(
+            self.job_name, "cancel_failed", "backend quiescence was not confirmed"
+        )
+        return False
+
     def monitor_job(self, nv_job_metadata=None):
         """Monitors the job status and updates job metadata"""
         if not self.spec:
@@ -1315,27 +1350,46 @@ class AutoMLPipeline(ActionPipeline):
                 break
             if k8s_status == "Error":
                 self.detailed_print(f"Relaunching job {self.job_name}")
+                if not claim_automl_child_relaunch(self.job_name):
+                    if self._cancellation_requested():
+                        self._finish_canceled_launch(backend_may_exist=True)
+                    break
                 wait_for_job_completion(self.job_name)
                 nv_job_metadata = {}
                 self.generate_nv_job_metadata(nv_job_metadata, workspace_metadata=self.workspace_metadata)
-                if BACKEND in (Backend.LOCAL_K8S, Backend.LOCAL_DOCKER):
-                    self.create_microservice_action_job(self.automl_brain_job_id, nv_job_metadata=nv_job_metadata)
-                else:
-                    ExecutionHandler.create_job_with_handler(
-                        org_name=self.job_context.org_name,
-                        job_name=self.job_name,
-                        image=self.image,
-                        command=run_command,
-                        workspace_metadata=self.workspace_metadata,
-                        num_gpu=self.num_gpu,
-                        num_nodes=self.num_nodes,
-                        accelerator=self.accelerator,
-                        docker_env_vars=self.job_env_variables,
-                        nv_job_metadata=nv_job_metadata,
-                        automl_brain=False,
-                        automl_exp_job=True,
-                        backend_details=self.job_context.backend_details
+                if self._cancellation_requested():
+                    self._finish_canceled_launch(backend_may_exist=True)
+                    break
+                try:
+                    if BACKEND in (Backend.LOCAL_K8S, Backend.LOCAL_DOCKER):
+                        self.create_microservice_action_job(
+                            self.automl_brain_job_id, nv_job_metadata=nv_job_metadata
+                        )
+                    else:
+                        ExecutionHandler.create_job_with_handler(
+                            org_name=self.job_context.org_name,
+                            job_name=self.job_name,
+                            image=self.image,
+                            command=run_command,
+                            workspace_metadata=self.workspace_metadata,
+                            num_gpu=self.num_gpu,
+                            num_nodes=self.num_nodes,
+                            accelerator=self.accelerator,
+                            docker_env_vars=self.job_env_variables,
+                            nv_job_metadata=nv_job_metadata,
+                            automl_brain=False,
+                            automl_exp_job=True,
+                            backend_details=self.job_context.backend_details
+                        )
+                except Exception as err:
+                    set_automl_child_launch_state(
+                        self.job_name, "uncertain", error=err
                     )
+                    raise
+                if self._cancellation_requested():
+                    self._finish_canceled_launch(backend_may_exist=True)
+                    break
+                set_automl_child_launch_state(self.job_name, "running")
             k8s_status = ExecutionHandler.get_job_status_with_handler(
                 job_name=self.job_name,
                 workspace_metadata=self.workspace_metadata,
@@ -1357,7 +1411,27 @@ class AutoMLPipeline(ActionPipeline):
 
     def run(self):
         """Calls necessary setup functions and calls job creation"""
+        launch_claimed = False
+        backend_create_started = False
         try:
+            launch_claimed = claim_automl_child_launch(self.job_name)
+            if not launch_claimed:
+                lifecycle = get_automl_child_lifecycle(self.job_name)
+                if lifecycle["cancel_requested"] and lifecycle["launch_state"] not in (
+                    "submitting", "running", "uncertain", "cancel_failed"
+                ):
+                    set_automl_child_launch_state(self.job_name, "quiescent")
+                logger.info(
+                    "AutoML child %s did not acquire launch claim; state=%s cancel_requested=%s",
+                    self.job_name,
+                    lifecycle["launch_state"],
+                    lifecycle["cancel_requested"],
+                )
+                return False
+            if self._cancellation_requested():
+                self._finish_canceled_launch(backend_may_exist=False)
+                return False
+
             recommended_values = self.recs_dict[self.rec_number].get("specs", {})
             self.cs_instance, _ = create_cs_instance(self.workspace_metadata)
             self.add_ptm_dependency(recommended_values)
@@ -1385,6 +1459,11 @@ class AutoMLPipeline(ActionPipeline):
             nv_job_metadata = {}
             self.generate_nv_job_metadata(nv_job_metadata, workspace_metadata=self.workspace_metadata)
 
+            if self._cancellation_requested():
+                self._finish_canceled_launch(backend_may_exist=False)
+                return False
+
+            backend_create_started = True
             if BACKEND in (Backend.LOCAL_K8S, Backend.LOCAL_DOCKER):
                 self.create_microservice_action_job(self.automl_brain_job_id, nv_job_metadata=nv_job_metadata)
             else:
@@ -1403,6 +1482,14 @@ class AutoMLPipeline(ActionPipeline):
                     automl_exp_job=False,
                     backend_details=self.job_context.backend_details
                 )
+
+            if self._cancellation_requested():
+                self._finish_canceled_launch(backend_may_exist=True)
+                return False
+            if not set_automl_child_launch_state(self.job_name, "running"):
+                raise RuntimeError(
+                    f"Unable to persist running launch state for AutoML child {self.job_name}"
+                )
             self.detailed_print(
                 f"AutoML recommendation with experiment id {self.rec_number} "
                 f"and job id {self.job_name} submitted"
@@ -1412,11 +1499,22 @@ class AutoMLPipeline(ActionPipeline):
             # This is the AutoML equivalent of the Pending → Started write
             # that normal jobs do in tao.jobs. It tells _reclaim_stale_gpus
             # that the container/pod now exists and can be checked.
-            if self.recs_dict and self.rec_number is not None:
-                prev_status = self.recs_dict[self.rec_number].get("status", "")
+            latest_recommendations = get_automl_controller_info(
+                self.automl_brain_job_id
+            ) or []
+            if (
+                latest_recommendations and
+                self.rec_number is not None and
+                self.rec_number < len(latest_recommendations) and
+                not self._cancellation_requested()
+            ):
+                prev_status = latest_recommendations[self.rec_number].get("status", "")
                 if prev_status in ("pending", ""):
-                    self.recs_dict[self.rec_number]["status"] = "started"
-                    save_automl_controller_info(self.automl_brain_job_id, self.recs_dict)
+                    latest_recommendations[self.rec_number]["status"] = "started"
+                    save_automl_controller_info(
+                        self.automl_brain_job_id, latest_recommendations
+                    )
+                    self.recs_dict = latest_recommendations
                     logger.info(
                         f"[LIFECYCLE] AutoML rec {self.rec_number} (job {self.job_name}): "
                         f"{prev_status or '(none)'} → started (container created)"
@@ -1492,6 +1590,18 @@ class AutoMLPipeline(ActionPipeline):
             return True
 
         except Exception as e:
+            lifecycle = get_automl_child_lifecycle(self.job_name)
+            if launch_claimed and lifecycle["launch_state"] == "submitting":
+                set_automl_child_launch_state(
+                    self.job_name,
+                    "uncertain" if backend_create_started else "quiescent",
+                    error=e if backend_create_started else "",
+                )
+            if self._cancellation_requested():
+                self._finish_canceled_launch(
+                    backend_may_exist=backend_create_started
+                )
+                return False
             self.detailed_print(
                 f"AutoMLpipeline for network {self.network} failed due to "
                 f"exception {traceback.format_exc()}"
@@ -1515,13 +1625,36 @@ class AutoMLPipeline(ActionPipeline):
             )
             self.detailed_print(self.job_name)
 
-            self.recs_dict[self.rec_number]["status"] = "failure"
-            save_automl_controller_info(self.automl_brain_job_id, self.recs_dict)
+            latest_recommendations = get_automl_controller_info(
+                self.automl_brain_job_id
+            ) or []
+            if self.rec_number is not None and self.rec_number < len(latest_recommendations):
+                latest_recommendations[self.rec_number]["status"] = "failure"
+                save_automl_controller_info(
+                    self.automl_brain_job_id, latest_recommendations
+                )
+                self.recs_dict = latest_recommendations
             update_automl_details_metadata(self.automl_brain_job_id, self.handler_id, self.handler_kind)
 
             update_job_status(self.handler_id, self.job_context.id, status="Error", kind=self.handler_kind)
-            ExecutionHandler.delete_with_handler(self.job_context.id, workspace_metadata=self.workspace_metadata)
+            deletion_confirmed = ExecutionHandler.delete_with_handler(
+                self.job_context.id, workspace_metadata=self.workspace_metadata
+            )
+            set_automl_child_launch_state(
+                self.job_name,
+                "quiescent" if deletion_confirmed is True else "uncertain",
+                "" if deletion_confirmed is True else "backend quiescence was not confirmed",
+            )
             return False
+        finally:
+            if launch_claimed:
+                lifecycle = get_automl_child_lifecycle(self.job_name)
+                if lifecycle["launch_state"] == "submitting":
+                    set_automl_child_launch_state(
+                        self.job_name,
+                        "uncertain" if backend_create_started else "quiescent",
+                        "launch exited without a terminal handshake state",
+                    )
 
 
 # Each Element can be called with a job_context and returns an ActionPipeline (or its derivative) object

@@ -50,12 +50,15 @@ from nvidia_tao_core.microservices.utils.stateless_handler_utils import (
     delete_dnn_status,
     update_automl_stats,
     report_health_beat,
-    delete_health_beat
+    delete_health_beat,
+    get_automl_child_job_ids,
+    reset_automl_child_lifecycle_for_resume,
+    set_automl_checkpoint_cleanup_state,
 )
 from nvidia_tao_core.microservices.utils.automl_job_utils import (
     on_new_automl_job,
     on_delete_automl_job,
-    on_cancel_automl_job
+    cancel_automl_child_job,
 )
 # Configure logging
 TAO_LOG_LEVEL = os.getenv('TAO_LOG_LEVEL', 'INFO').upper()
@@ -160,6 +163,10 @@ class Controller:
 
         self.old_bracket = "0"
         self.hyperband_cancel_condition_seen = False
+        job_metadata = get_handler_job_metadata(self.automl_context.id) or {}
+        self._checkpoint_cleanup_pending = bool(
+            job_metadata.get("checkpoint_cleanup_pending", False)
+        )
 
         self.wandb_group_name = f"automl_{self.automl_context.id}"
         self.parameter_names = list(parameter_names) if parameter_names else []
@@ -433,14 +440,27 @@ class Controller:
     def cancel_recommendation_jobs(self):
         """Cleanup recommendation jobs"""
         backend = os.getenv("TAO_EXECUTION_BACKEND", "local-k8s")
+        all_children_stopped = True
+        known_child_ids = set()
         for rec in self.recommendations:
             job_name = rec.job_id
             logger.info("Deleting %s", job_name)
             if not job_name:
                 continue
+            known_child_ids.add(job_name)
             if not os.getenv("CI_PROJECT_DIR", None):
                 logger.info("Cancelling automl job at end of controller %s", job_name)
-                on_cancel_automl_job(rec.job_id)
+                cancel_result = cancel_automl_child_job(rec.job_id)
+                if cancel_result is not True:
+                    all_children_stopped = False
+                    logger.warning(
+                        "Could not confirm termination of AutoML child job %s; "
+                        "retaining its checkpoint artifacts",
+                        job_name,
+                    )
+            else:
+                # A test/CI shortcut is not proof that a real writer is absent.
+                all_children_stopped = False
 
             # Stop log monitoring for this experiment
             if backend in ("local-k8s", "local-docker"):
@@ -452,8 +472,166 @@ class Controller:
                 except Exception as e:
                     logger.warning(f"[AUTOML-CONTROLLER] Failed to stop log monitoring for {job_name}: {e}")
 
+        # Include workflow children that were durably enqueued but were not yet
+        # present in the controller's in-memory recommendation snapshot.
+        for child_job_id in set(
+            get_automl_child_job_ids(self.automl_context.id)
+        ) - known_child_ids:
+            if cancel_automl_child_job(child_job_id) is not True:
+                all_children_stopped = False
+
+        cleanup_complete = not self._checkpoint_cleanup_pending
+        if self._checkpoint_cleanup_pending and all_children_stopped:
+            try:
+                # Child jobs have now been stopped, so bind-mounted artifacts are no longer
+                # being written and platform ownership repair has had a chance to run.
+                set_automl_checkpoint_cleanup_state(
+                    self.automl_context.id, "cleaning"
+                )
+                cleanup_complete = self._cleanup_checkpoints_on_cancellation()
+            except Exception as err:
+                cleanup_complete = False
+                logger.warning(
+                    "Unexpected checkpoint cleanup failure for canceled AutoML job %s: %s",
+                    self.automl_context.id, err
+                )
+                set_automl_checkpoint_cleanup_state(
+                    self.automl_context.id, "pending", error=err
+                )
+            if cleanup_complete and set_automl_checkpoint_cleanup_state(
+                self.automl_context.id, "complete"
+            ):
+                self._checkpoint_cleanup_pending = False
+            else:
+                cleanup_complete = False
+                self._checkpoint_cleanup_pending = True
+                set_automl_checkpoint_cleanup_state(
+                    self.automl_context.id,
+                    "pending",
+                    error="one or more checkpoint artifacts could not be removed",
+                )
+        elif self._checkpoint_cleanup_pending:
+            logger.warning(
+                "Skipping checkpoint cleanup for AutoML job %s because one or "
+                "more child writers were not confirmed stopped",
+                self.automl_context.id,
+            )
+
+        if not all_children_stopped or not cleanup_complete:
+            logger.warning(
+                "Retaining AutoML controller %s so child cancellation and "
+                "artifact cleanup can be retried",
+                self.automl_context.id,
+            )
+            return False
+
         logger.info("Deleting automl job %s", self.automl_context.id)
         on_delete_automl_job(self.automl_context.id)
+        return all_children_stopped
+
+    def _schedule_checkpoint_cleanup(self):
+        """Durably request cancellation cleanup before stopping any child."""
+        self._checkpoint_cleanup_pending = True
+        if not set_automl_checkpoint_cleanup_state(
+            self.automl_context.id, "pending"
+        ):
+            logger.error(
+                "Unable to persist checkpoint cleanup intent for AutoML job %s",
+                self.automl_context.id,
+            )
+            return False
+        return True
+
+    def _finish_pending_checkpoint_cleanup(self):
+        """Retry cancellation until all launchers and artifact deletes are quiescent."""
+        while True:
+            if self.cancel_recommendation_jobs() is not False:
+                return True
+            report_health_beat(
+                self.automl_context.id,
+                "Waiting for AutoML child quiescence and checkpoint cleanup retry",
+            )
+            time.sleep(5)
+
+    def _cleanup_checkpoints_on_cancellation(self):
+        """Delete checkpoint artifacts that cannot be used after AutoML cancellation.
+
+        The controller can observe the parent job's canceled state before ``read_results``
+        gets another opportunity to run its normal checkpoint cleanup. Preserve the best
+        completed recommendation while removing artifacts from the remaining recommendations.
+        Paused jobs never enter this terminal cleanup path, so their resume sources remain intact.
+        """
+        if not self.delete_intermediate_ckpt:
+            logger.info(
+                "Skipping checkpoint cleanup for canceled AutoML job %s because "
+                "automl_delete_intermediate_ckpt is disabled",
+                self.automl_context.id
+            )
+            return True
+
+        try:
+            self.refresh_recommendations()
+        except Exception as err:
+            logger.warning(
+                "Unable to refresh recommendations before cancellation cleanup for AutoML job %s: %s",
+                self.automl_context.id, err
+            )
+            return False
+
+        successful_recs = [
+            rec for rec in self.recommendations if rec.status == JobStates.success
+        ]
+        best_rec_id = None
+        if successful_recs:
+            try:
+                best_rec_id = self.min_max(successful_recs, key=lambda rec: rec.result).id
+            except Exception as err:
+                # Failing closed here avoids deleting a potentially best checkpoint.
+                logger.warning(
+                    "Unable to identify the best recommendation during cancellation cleanup "
+                    "for AutoML job %s; preserving completed recommendations: %s",
+                    self.automl_context.id, err
+                )
+
+        # Pause deliberately skips terminal cleanup and is the supported resume
+        # path. Once the parent is canceled, errored, or completed, promotion
+        # sources are no longer live dependencies; retaining every successful
+        # Hyperband/ASHA/PBT trial would recreate the disk-exhaustion issue.
+
+        all_artifacts_cleaned = True
+        for rec in self.recommendations:
+            if not rec.job_id:
+                continue
+
+            try:
+                expt_root = self._get_experiment_results_path(rec.job_id)
+                if rec.id == best_rec_id:
+                    # Retain the selected best checkpoint, but discard its intermediate saves.
+                    if self.delete_checkpoint_files(
+                        expt_root, rec, retain_resume_checkpoint=False
+                    ) is False:
+                        all_artifacts_cleaned = False
+                elif best_rec_id is None and rec.status == JobStates.success:
+                    # If best selection failed, preserve all successful recommendations.
+                    logger.info(
+                        "Preserving successful recommendation %s because the current best "
+                        "could not be determined",
+                        rec.id
+                    )
+                else:
+                    self.delete_not_best_model_checkpoints(expt_root, rec, True)
+                    if not getattr(
+                        self, "_last_checkpoint_delete_verified", True
+                    ):
+                        all_artifacts_cleaned = False
+            except Exception as err:
+                all_artifacts_cleaned = False
+                logger.warning(
+                    "Failed to clean checkpoint artifacts for canceled AutoML recommendation %s "
+                    "(job %s): %s",
+                    rec.id, rec.job_id, err
+                )
+        return all_artifacts_cleaned
 
     def start(self):
         """Starts the automl controller"""
@@ -478,8 +656,17 @@ class Controller:
                 "AutoML train started, more details in automl_brain_info of response"
             )
             self._execute_loop()
+            result_metadata = get_handler_job_metadata(self.automl_context.id) or {}
+            current_status = str(result_metadata.get("status", "")).lower()
+            if self._checkpoint_cleanup_pending or current_status in ("canceled", "canceling"):
+                # Preserve the externally managed cancellation state. Child shutdown also
+                # performs the deferred, ownership-safe checkpoint cleanup.
+                self._schedule_checkpoint_cleanup()
+                self._finish_pending_checkpoint_cleanup()
+                delete_health_beat(self.automl_context.id)
+                return
+
             status = "Error"
-            result_metadata = get_handler_job_metadata(self.automl_context.id)
             best_model_path = self._get_experiment_results_path(self.automl_context.id)
             result_metadata["job_details"][self.automl_context.id] = {
                 "detailed_status": {
@@ -568,9 +755,25 @@ class Controller:
                         }
                     }
 
+            # Final pruning is a durable phase, separate from best-model
+            # handoff. This covers parallel algorithms such as ASHA whose trial
+            # checkpoints may not have been incrementally pruned.
+            # Do not let the older metadata snapshot overwrite the fresh
+            # cleanup handshake fields written below.
+            for cleanup_key in (
+                "checkpoint_cleanup_pending",
+                "checkpoint_cleanup_status",
+                "checkpoint_cleanup_error",
+                "checkpoint_cleanup_updated_at",
+            ):
+                result_metadata.pop(cleanup_key, None)
+            if not self._schedule_checkpoint_cleanup():
+                raise RuntimeError(
+                    "Unable to persist terminal AutoML checkpoint cleanup intent"
+                )
             write_job_metadata(self.automl_context.id, result_metadata)
             update_job_status(self.automl_context.handler_id, self.automl_context.id, status=status, kind="experiments")
-            self.cancel_recommendation_jobs()
+            self._finish_pending_checkpoint_cleanup()
 
             # Final WandB table update
             if self.wandb_initialized:
@@ -590,21 +793,31 @@ class Controller:
                 "AutoMLpipeline loop for network %s with job id %s failed due to exception %s",
                 self.network, self.automl_context.id, traceback.format_exc()
             )
-            result_metadata = get_handler_job_metadata(self.automl_context.id)
-            result_metadata["job_details"][self.automl_context.id] = {
-                "detailed_status": {
-                    "message": "AutoML train failed due to run-time exception",
-                    "status": "FAILURE"
-                }
-            }
-            write_job_metadata(self.automl_context.id, result_metadata)
-            self.cancel_recommendation_jobs()
-            update_job_status(
-                self.automl_context.handler_id,
-                self.automl_context.id,
-                status="Error",
-                kind="experiments"
+            result_metadata = get_handler_job_metadata(self.automl_context.id) or {}
+            current_status = str(result_metadata.get("status", "")).lower()
+            cancellation_in_progress = (
+                self._checkpoint_cleanup_pending or current_status in ("canceled", "canceling")
             )
+            if not cancellation_in_progress:
+                result_metadata["job_details"][self.automl_context.id] = {
+                    "detailed_status": {
+                        "message": "AutoML train failed due to run-time exception",
+                        "status": "FAILURE"
+                    }
+                }
+                write_job_metadata(self.automl_context.id, result_metadata)
+
+            # Abnormal exits bypass read_results just like cancellation exits. Schedule
+            # eligible cleanup before stopping children; the deletion flag still controls it.
+            self._schedule_checkpoint_cleanup()
+            self._finish_pending_checkpoint_cleanup()
+            if not cancellation_in_progress:
+                update_job_status(
+                    self.automl_context.handler_id,
+                    self.automl_context.id,
+                    status="Error",
+                    kind="experiments"
+                )
 
             # Clean up WandB on error
             if self.wandb_initialized:
@@ -759,14 +972,7 @@ class Controller:
             f"automl_job_id={automl_context.id}, temp_rec={temp_rec}, "
             f"num_recommendations={len(ctrl.recommendations)}"
         )
-        # if ctrl.recommendations[temp_rec].status != JobStates.canceled:
-        #     ctrl.recommendations[temp_rec].update_status(JobStates.success)
         ctrl.save_state()
-        if ctrl.recommendations[temp_rec].status == JobStates.canceled:
-            logger.info("Resuming stopped automl sub-experiment %s", temp_rec)
-            if ctrl.automl_algorithm in ("hyperband", "bohb", "asha", "dehb", "hyperband_es", "hes"):
-                ctrl.brain.track_id = temp_rec
-            ctrl.on_new_automl_job(ctrl.recommendations[temp_rec])
 
         if temp_rec is not None and temp_rec < len(ctrl.recommendations):
             rec_status = ctrl.recommendations[temp_rec].status
@@ -776,6 +982,12 @@ class Controller:
                 f"is_canceled={rec_status == JobStates.canceled}"
             )
             if rec_status == JobStates.canceled:
+                child_job_id = ctrl.recommendations[temp_rec].job_id
+                if not reset_automl_child_lifecycle_for_resume(child_job_id):
+                    raise RuntimeError(
+                        "AutoML child cancellation fence could not be reset for "
+                        f"paused recommendation {child_job_id}"
+                    )
                 logger.debug(
                     f"[CONTROLLER-LOAD-STATE] Resuming stopped automl sub-experiment: "
                     f"automl_job_id={automl_context.id}, rec_id={temp_rec}, "
@@ -829,10 +1041,13 @@ class Controller:
                 f"{self.automl_algorithm_settings.automl_max_recommendations})"
             )
 
-            metadata = get_handler_job_metadata(self.automl_context.id)
-            current_status = metadata.get("status", "")
+            metadata = get_handler_job_metadata(self.automl_context.id) or {}
+            current_status = str(metadata.get("status", "")).lower()
             automl_status = get_automl_controller_info(self.automl_context.id)
             if current_status in ("canceled", "canceling"):
+                # Defer storage cleanup until cancel_recommendation_jobs has stopped every
+                # child process. This avoids racing checkpoint writers and ownership repair.
+                self._schedule_checkpoint_cleanup()
                 return
             if automl_status:
                 self.completed_recommendations = len(automl_status)
@@ -874,12 +1089,10 @@ class Controller:
                     logger.info("best_model_copied result %s", self.best_model_copied)
 
                     if self.best_model_copied:
-                        # Delete final extra checkpoints after finish training
-                        for rec in self.recommendations:
-                            expt_root = self._get_experiment_results_path(rec.job_id)
-                            self.get_best_checkpoint_path(expt_root, rec)
-                            if self.delete_intermediate_ckpt:
-                                self.delete_not_best_model_checkpoints(expt_root, rec, True)
+                        # Trial pruning happens after final status construction via
+                        # the durable cleanup barrier in ``start``. Do not delete
+                        # here: child writers and remote storage acknowledgements
+                        # have not yet been joined into one terminal barrier.
                         handler_metadata = get_handler_metadata(
                             self.automl_context.handler_id, "experiments"
                         )
@@ -1131,6 +1344,18 @@ class Controller:
                     f"automl_job_id={self.automl_context.id}, rec_id={rec_id}, "
                     f"rec_job_id={self.recommendations[rec_id].job_id}"
                 )
+                # Multi-fidelity promotions intentionally reuse the same child
+                # job ID and checkpoint directory. read_results fenced and
+                # quiesced the prior writer before inspecting its checkpoint;
+                # explicitly re-arm that identity for this one promoted launch.
+                # A concurrent parent Canceling/Paused state is still checked by
+                # AutoMLPipeline before and after its atomic launch claim.
+                child_job_id = self.recommendations[rec_id].job_id
+                if not reset_automl_child_lifecycle_for_resume(child_job_id):
+                    raise RuntimeError(
+                        "AutoML child cancellation fence could not be reset for "
+                        f"promoted recommendation {child_job_id}"
+                    )
                 self.on_new_automl_job(self.recommendations[rec_id])
                 logger.debug(
                     f"[AUTOML-CONTROLLER-RESUME] Resume recommendation processing completed: "
@@ -1144,6 +1369,7 @@ class Controller:
         flag = False
         self.refresh_recommendations()
         for rec in self.recommendations:
+            child_quiescent = True
             # Report health beat for each experiment being processed
             report_health_beat(
                 self.automl_context.id,
@@ -1164,6 +1390,14 @@ class Controller:
 
             # If rec already changed to Success, no need to check
             if rec.status in [JobStates.success, JobStates.failure]:
+                child_quiescent = cancel_automl_child_job(rec.job_id) is True
+                if not child_quiescent:
+                    logger.warning(
+                        "Deferring checkpoint cleanup for completed AutoML child %s "
+                        "until backend quiescence is confirmed",
+                        rec.job_id,
+                    )
+                    continue
                 # Apply penalty for failed experiments if result is still 0.0
                 if rec.status == JobStates.failure and rec.result == 0.0:
                     if self.brain.reverse_sort:
@@ -1179,7 +1413,9 @@ class Controller:
                     self.save_state()
 
                 if self.delete_intermediate_ckpt:
-                    self.delete_checkpoint_files(cloud_expt_root, rec)
+                    self.delete_checkpoint_files(
+                        cloud_expt_root, rec, retain_resume_checkpoint=True
+                    )
                     # Remove the checkpoints from not best model
                     brain_dict = get_automl_brain_info(self.automl_context.id)
                     if brain_dict:
@@ -1197,7 +1433,10 @@ class Controller:
                                 f"AutoML ({self.automl_algorithm}): Non-resuming algorithm, "
                                 f"safe to delete non-best checkpoints"
                             )
-                        elif self.automl_algorithm in ("hyperband", "h", "bohb", "dehb", "hyperband_es", "hes"):
+                        elif self.automl_algorithm in (
+                            "hyperband", "h", "bohb", "asha", "dehb",
+                            "hyperband_es", "hes"
+                        ):
                             # Hyperband-based: Only delete when bracket changes AND all configs complete
                             # This ensures configs needed for next rung's resume are preserved
                             if self.old_bracket != brain_dict.get("bracket", "0"):
@@ -1339,7 +1578,7 @@ class Controller:
                     f"Final Status: {status}\n"
                     f"Final Result: {validation_map}\n"
                     f"Reason: Experiment completed with status={status}\n"
-                    f"Action: Calling on_cancel_automl_job to delete StatefulSet\n"
+                    f"Action: Fencing and deleting the child backend\n"
                     f"{'-' * 80}"
                 )
 
@@ -1347,7 +1586,13 @@ class Controller:
                     self.automl_context.id,
                     f"Cancelling completed job {rec.job_id} (experiment {rec.id})"
                 )
-                on_cancel_automl_job(rec.job_id)
+                child_quiescent = cancel_automl_child_job(rec.job_id) is True
+                if not child_quiescent:
+                    logger.warning(
+                        "AutoML child %s reached %s but backend quiescence is "
+                        "not yet confirmed; checkpoint cleanup will retry",
+                        rec.job_id, status,
+                    )
             if old_status != status:
                 rec.update_status(status)
                 self.save_state()
@@ -1357,9 +1602,15 @@ class Controller:
                         with open(container_log_file, "a", encoding='utf-8') as f:
                             f.write("\nEOF\n")
 
-            if rec.status in [JobStates.success, JobStates.failure] and self.delete_intermediate_ckpt:
+            if (
+                rec.status in [JobStates.success, JobStates.failure] and
+                self.delete_intermediate_ckpt and
+                child_quiescent
+            ):
                 # Retain the latest checkpoint and remove others in experiment folder
-                self.delete_checkpoint_files(cloud_expt_root, rec)
+                self.delete_checkpoint_files(
+                    cloud_expt_root, rec, retain_resume_checkpoint=True
+                )
 
         if self.automl_algorithm in ("hyperband", "h", "bohb", "dehb", "hyperband_es", "hes"):
             brain_dict = get_automl_brain_info(self.automl_context.id)
@@ -1656,14 +1907,20 @@ class Controller:
                     return -1
         return -1
 
-    def get_checkpoint_paths_matching_epoch_number(self, path, rec_id):
+    def get_checkpoint_paths_matching_epoch_number(
+        self, path, rec_id, epoch_number=None
+    ):
         """Get checkpoints from cloud_path and filter based on epoch number
 
         For networks with folder-based checkpoints (like cosmos-rl), this will find
         folders for different formats (.pth, .safetensors) separately.
         """
         checkpoint_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, path)
-        format_epoch_number = format_epoch(self.network, self.best_epoch_number[rec_id])
+        selected_epoch = (
+            self.best_epoch_number[rec_id]
+            if epoch_number is None else epoch_number
+        )
+        format_epoch_number = format_epoch(self.network, selected_epoch)
         if self._uses_folder_lookup():
             # For folder lookup, look for epoch-numbered folders (e.g., epoch_1/, epoch_2/)
             if self.network in MISSING_EPOCH_FORMAT_NETWORKS:
@@ -1779,7 +2036,13 @@ class Controller:
             if find_trained_safetensors:
                 self.ckpt_path[path]["safetensors"] = find_trained_safetensors[0]
 
-    def delete_checkpoint_files(self, path, rec, filter_by_format=False):
+    def delete_checkpoint_files(
+        self,
+        path,
+        rec,
+        filter_by_format=False,
+        retain_resume_checkpoint=False,
+    ):
         """Remove the extra checkpoints generated after the on_cancel_automl_job"""
         report_health_beat(
             self.automl_context.id,
@@ -1794,9 +2057,34 @@ class Controller:
         trained_files = filter_files(trained_files, regex_pattern)
         logger.info("Available checkpoints in delete_checkpoint_files function %s", trained_files)
         self.get_best_checkpoint_path(path, rec, filter_by_format=filter_by_format)
+        if (
+            retain_resume_checkpoint and
+            self.automl_algorithm in (
+                "hyperband", "h", "bohb", "asha", "dehb",
+                "hyperband_es", "hes", "pbt",
+            ) and
+            getattr(rec, "early_stop_epoch", None) is not None
+        ):
+            resume_paths = self.get_checkpoint_paths_matching_epoch_number(
+                path, rec.id, epoch_number=rec.early_stop_epoch
+            )
+            for format_name, candidates in zip(
+                ("tlt", "hdf5", "pth", "ckzip", "safetensors"),
+                resume_paths,
+            ):
+                if candidates:
+                    candidate = candidates[0]
+                    if candidate not in self.ckpt_path[path].values():
+                        self.ckpt_path[path][f"resume_{format_name}"] = candidate
+            logger.info(
+                "Retaining rung-boundary checkpoint at epoch %s for possible "
+                "promotion of recommendation %s",
+                rec.early_stop_epoch, rec.id,
+            )
         logger.info("self.ckpt_path in delete_checkpoint_files function %s", self.ckpt_path)
         logger.info("RETAIN_CHECKPOINTS_FOR_RESUME setting: %s", self.retain_checkpoints_for_resume)
 
+        deletion_accepted = True
         for files in trained_files:
             should_delete = True
 
@@ -1815,21 +2103,53 @@ class Controller:
                 logger.info("Removing item in delete_checkpoint_files function %s", files)
                 if self.cs_instance.is_file(files):
                     logger.info("Removing file in delete_checkpoint_files function %s", files)
-                    self.cs_instance.delete_file(files)
+                    if self.cs_instance.delete_file(files) is False:
+                        deletion_accepted = False
                     report_health_beat(
                         self.automl_context.id,
                         f"Deleting checkpoint file {files} for experiment {rec.id}"
                     )
                 elif self._uses_folder_lookup():
                     logger.info("Removing folder in delete_checkpoint_files function %s", files)
-                    self.cs_instance.delete_folder(files[1:])
+                    if self.cs_instance.delete_folder(files[1:]) is False:
+                        deletion_accepted = False
                     report_health_beat(
                         self.automl_context.id,
                         f"Deleting checkpoint file {files} for experiment {rec.id}"
                     )
 
+        # Storage APIs can acknowledge a delete while leaving a prefix behind.
+        # Re-list and require every remaining checkpoint to belong to the one
+        # protected best checkpoint. A stale remote listing simply leaves the
+        # durable cleanup phase pending for retry.
+        remaining = filter_files(
+            get_file_list_from_cloud_storage(
+                self.decrypted_workspace_metadata, path
+            ),
+            regex_pattern,
+        )
+        protected = tuple(self.ckpt_path[path].values())
+        if self._uses_folder_lookup():
+            unprotected = [
+                item for item in remaining
+                if not any(
+                    item == checkpoint or item.startswith(checkpoint + "/")
+                    for checkpoint in protected
+                )
+            ]
+        else:
+            unprotected = [item for item in remaining if item not in protected]
+        if unprotected:
+            logger.warning(
+                "Checkpoint cleanup for experiment %s is not yet visible; "
+                "remaining unprotected artifacts: %s",
+                rec.id, unprotected,
+            )
+        return deletion_accepted and not unprotected
+
     def delete_not_best_model_checkpoints(self, path, rec, flag):
         """Remove the checkpoints which don't correspond to the best result"""
+        self._last_checkpoint_delete_verified = True
         try:
             valid_recs = [r for r in self.recommendations
                           if r.status in (JobStates.success, JobStates.failure)]
@@ -1855,10 +2175,70 @@ class Controller:
             regex_pattern = r'.*(?:lightning_logs|events).*$|.*\.(tlt|hdf5|pth|ckzip|safetensors|resume)$'
             trained_files = filter_files(trained_files, regex_pattern)
             logger.info("Available checkpoints in delete_not_best_model_checkpoints function %s", trained_files)
-            for files in trained_files:
-                if self.cs_instance.is_file(files):
-                    logger.info("Removing files in delete_not_best_model_checkpoints function %s", files)
-                    self.cs_instance.delete_file(files)
+            if self._uses_folder_lookup():
+                # Folder checkpoints contain marker/config files without a recognized
+                # extension (for example Cosmos .rank_*_complete and cosmos_config).
+                # Delete each checkpoint leaf recursively so those sidecars do not remain.
+                result_root = os.path.normpath(path).lstrip("/")
+                checkpoint_folders = []
+                checkpoint_folder_keys = []
+                flat_checkpoint_files = []
+                for files in sorted(
+                    trained_files, key=lambda item: os.path.dirname(item).count("/")
+                ):
+                    folder = os.path.dirname(files)
+                    folder_key = os.path.normpath(folder).lstrip("/")
+                    if folder_key == result_root:
+                        # Never recursively delete the experiment root merely because a
+                        # folder-based network wrote a checkpoint directly into it.
+                        flat_checkpoint_files.append(files)
+                    elif not folder_key.startswith(result_root + "/"):
+                        logger.warning(
+                            "Skipping checkpoint path outside experiment root %s: %s",
+                            path, files
+                        )
+                    elif not any(
+                        folder_key == existing or folder_key.startswith(existing + "/")
+                        for existing in checkpoint_folder_keys
+                    ):
+                        checkpoint_folders.append(folder)
+                        checkpoint_folder_keys.append(folder_key)
+
+                for folder in checkpoint_folders:
+                    logger.info(
+                        "Removing folder in delete_not_best_model_checkpoints function %s",
+                        folder
+                    )
+                    if self.cs_instance.delete_folder(folder) is False:
+                        self._last_checkpoint_delete_verified = False
+                for files in flat_checkpoint_files:
+                    if self.cs_instance.is_file(files):
+                        logger.info(
+                            "Removing file in delete_not_best_model_checkpoints function %s",
+                            files
+                        )
+                        if self.cs_instance.delete_file(files) is False:
+                            self._last_checkpoint_delete_verified = False
+            else:
+                for files in trained_files:
+                    if self.cs_instance.is_file(files):
+                        logger.info("Removing files in delete_not_best_model_checkpoints function %s", files)
+                        if self.cs_instance.delete_file(files) is False:
+                            self._last_checkpoint_delete_verified = False
+
+            remaining = filter_files(
+                get_file_list_from_cloud_storage(
+                    self.decrypted_workspace_metadata, path
+                ),
+                regex_pattern,
+            )
+            if remaining:
+                self._last_checkpoint_delete_verified = False
+                logger.warning(
+                    "Checkpoint deletion for recommendation %s is not yet "
+                    "visible; retaining cleanup intent for: %s",
+                    rec.id, remaining,
+                )
         else:
             flag = True
         return flag

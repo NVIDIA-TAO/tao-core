@@ -128,6 +128,11 @@ class BackboneConfig:
             "fan_base_16_p4_hybrid",
             "vit_large_nvdinov2",
             "vit_giant_nvdinov2",
+            "vit_small_dinov3",
+            "vit_small_plus_dinov3",
+            "vit_base_dinov3",
+            "vit_large_dinov3",
+            "vit_huge_plus_dinov3",
             "vit_base_nvclip_16_siglip",
             "vit_huge_nvclip_14_siglip"
         ]),
@@ -155,6 +160,18 @@ class BackboneConfig:
 class SFModelConfig:
     """SF Model config."""
 
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Deterministic MSDeformAttn",
+        description=(
+            "When True, route MultiScaleDeformableAttention through the deterministic "
+            "pure-PyTorch implementation instead of the custom CUDA op, whose atomicAdd "
+            "backward has no deterministic kernel. Combined with train.cudnn.deterministic "
+            "this yields reproducible training, at some speed/memory cost. Default False "
+            "(fused CUDA op, current behavior)."
+        ),
+    )
     backbone: BackboneConfig = DATACLASS_FIELD(BackboneConfig())
     decode_head: SegFormerHeadConfig = DATACLASS_FIELD(SegFormerHeadConfig())
 

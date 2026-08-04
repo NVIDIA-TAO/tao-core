@@ -97,7 +97,7 @@ def Code(code, data={}, msg="", use_data_as_response=False):
     if code == 200:
         return TAOResponse(code, data, msg)
 
-    if code in [400, 404]:
+    if code in [400, 404, 409]:
         if use_data_as_response:
             # Use data directly as response, just like 200 responses
             return TAOResponse(code, data, msg)

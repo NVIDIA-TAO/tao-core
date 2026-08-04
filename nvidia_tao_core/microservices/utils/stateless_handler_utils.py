@@ -322,6 +322,142 @@ def write_job_metadata(job_id, metadata):
     mongo_jobs.upsert(jobs_query, metadata)
 
 
+AUTOML_NONQUIESCENT_LAUNCH_STATES = frozenset({
+    "submitting", "running", "uncertain", "cancel_failed"
+})
+
+
+def get_automl_child_lifecycle(job_id):
+    """Return the durable launch/cancel handshake for an AutoML child job."""
+    metadata = get_handler_job_metadata(job_id) or {}
+    return {
+        "cancel_requested": bool(metadata.get("automl_cancel_requested", False)),
+        "launch_state": metadata.get("automl_launch_state", "queued"),
+        "error": metadata.get("automl_launch_error", ""),
+    }
+
+
+def get_automl_child_job_ids(brain_job_id):
+    """Return every durable workflow child associated with an AutoML brain."""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    return [
+        job.get("id")
+        for job in mongo_jobs.find({"parent_id": brain_job_id})
+        if job.get("id")
+    ]
+
+
+def request_automl_child_cancellation(job_id):
+    """Durably fence an AutoML child so no new platform launch may start."""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    result = mongo_jobs.collection.update_one(
+        {"id": job_id},
+        {
+            "$set": {
+                "automl_cancel_requested": True,
+                "automl_cancel_requested_at": datetime.now(tz=timezone.utc),
+            }
+        },
+    )
+    return result.matched_count == 1
+
+
+def claim_automl_child_launch(job_id):
+    """Atomically claim the right to submit an AutoML child to its backend.
+
+    A cancellation tombstone wins over a concurrent launch claim. The caller must
+    transition ``submitting`` to ``running``, ``uncertain``, or ``quiescent``.
+    """
+    mongo_jobs = MongoHandler("tao", "jobs")
+    result = mongo_jobs.collection.update_one(
+        {
+            "id": job_id,
+            "automl_cancel_requested": {"$ne": True},
+            "automl_launch_state": {
+                "$nin": list(AUTOML_NONQUIESCENT_LAUNCH_STATES)
+            },
+        },
+        {
+            "$set": {
+                "automl_launch_state": "submitting",
+                "automl_launch_error": "",
+                "automl_launch_updated_at": datetime.now(tz=timezone.utc),
+            }
+        },
+    )
+    return result.modified_count == 1
+
+
+def claim_automl_child_relaunch(job_id):
+    """Atomically move a running child back into a fenced submit phase."""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    result = mongo_jobs.collection.update_one(
+        {
+            "id": job_id,
+            "automl_cancel_requested": {"$ne": True},
+            "automl_launch_state": "running",
+        },
+        {
+            "$set": {
+                "automl_launch_state": "submitting",
+                "automl_launch_error": "",
+                "automl_launch_updated_at": datetime.now(tz=timezone.utc),
+            }
+        },
+    )
+    return result.modified_count == 1
+
+
+def set_automl_child_launch_state(job_id, state, error=""):
+    """Persist an AutoML child launch state without replacing other job fields."""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    result = mongo_jobs.collection.update_one(
+        {"id": job_id},
+        {
+            "$set": {
+                "automl_launch_state": state,
+                "automl_launch_error": str(error) if error else "",
+                "automl_launch_updated_at": datetime.now(tz=timezone.utc),
+            }
+        },
+    )
+    return result.matched_count == 1
+
+
+def reset_automl_child_lifecycle_for_resume(job_id):
+    """Re-arm a quiescent child when an explicitly paused AutoML run resumes."""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    result = mongo_jobs.collection.update_one(
+        {"id": job_id},
+        {
+            "$set": {
+                "automl_cancel_requested": False,
+                "automl_launch_state": "queued",
+                "automl_launch_error": "",
+                "automl_launch_updated_at": datetime.now(tz=timezone.utc),
+            }
+        },
+    )
+    return result.modified_count == 1
+
+
+def set_automl_checkpoint_cleanup_state(job_id, state, error=""):
+    """Persist the parent AutoML checkpoint-cleanup retry state."""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    result = mongo_jobs.collection.update_one(
+        {"id": job_id},
+        {
+            "$set": {
+                "checkpoint_cleanup_pending": state not in ("complete", "skipped"),
+                "checkpoint_cleanup_status": state,
+                "checkpoint_cleanup_error": str(error) if error else "",
+                "checkpoint_cleanup_updated_at": datetime.now(tz=timezone.utc),
+            }
+        },
+    )
+    return result.matched_count == 1
+
+
 def get_job_id_of_action(handler_id, kind, action):
     """Find jobID within a handler matching an action"""
     handler_job_id = None

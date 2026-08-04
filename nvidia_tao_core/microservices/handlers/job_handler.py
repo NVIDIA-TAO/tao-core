@@ -635,6 +635,12 @@ class JobHandler:
             update_job_status(handler_id, job_id, status="Canceling", kind=kind + "s")
             logger.debug(f"[CANCEL] Job status updated to Canceling: job_id={job_id}")
             automl_response = AutoMLHandler.stop(user_id, org_name, handler_id, job_id)
+            if automl_response.code != 200:
+                logger.warning(
+                    "[CANCEL] AutoML cancellation remains pending: job_id=%s response=%s",
+                    job_id, automl_response.code,
+                )
+                return automl_response
             # Remove any pending jobs from Workflow queue
             try:
                 logger.debug(f"[CANCEL] Removing pending AutoML jobs from workflow: job_id={job_id}")
@@ -779,7 +785,15 @@ class JobHandler:
             logger.debug(f"[PAUSE] Processing AutoML pause: job_id={job_id}, handler_id={handler_id}")
             update_job_status(handler_id, job_id, status="Pausing", kind=kind + "s")
             logger.debug(f"[PAUSE] Job status updated to Pausing: job_id={job_id}")
-            automl_response = AutoMLHandler.stop(user_id, org_name, handler_id, job_id)
+            automl_response = AutoMLHandler.stop(
+                user_id, org_name, handler_id, job_id, cleanup_checkpoints=False
+            )
+            if automl_response.code != 200:
+                logger.warning(
+                    "[PAUSE] AutoML pause remains pending: job_id=%s response=%s",
+                    job_id, automl_response.code,
+                )
+                return automl_response
             # Remove any pending jobs from Workflow queue
             try:
                 logger.debug(f"[PAUSE] Removing pending AutoML jobs from workflow: job_id={job_id}")

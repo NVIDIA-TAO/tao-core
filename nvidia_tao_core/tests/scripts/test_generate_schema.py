@@ -8,9 +8,12 @@ import os
 import pathlib
 import pytest
 
+from omegaconf import OmegaConf
+
 from nvidia_tao_core.microservices.constants import TAO_NETWORKS
 from nvidia_tao_core.microservices.enum_constants import _get_network_architectures
 from nvidia_tao_core.microservices.utils.core_utils import get_microservices_network_and_action
+from nvidia_tao_core.config.clip.default_config import CLIPValDataConfig
 from nvidia_tao_core.scripts.generate_schema import generate_schema
 
 EXCLUDED_KEYWORDS = [
@@ -87,3 +90,92 @@ def test_networks_with_valid_actions(network, action):
     assert isinstance(schema, dict)
     assert "properties" in schema
     assert "default" in schema
+
+
+def test_clip_train_metadata_masking_schema():
+    """CLIP train schema exposes metadata-masked SigLIP configuration."""
+    schema = generate_schema("clip", "train")
+
+    train_dataset = schema["properties"]["dataset"]["properties"]["train"]
+    train_dataset_default = schema["default"]["dataset"]["train"]
+    train = schema["properties"]["train"]
+    train_default = schema["default"]["train"]
+
+    include_metadata = train_dataset["properties"]["include_attribute_metadata"]
+    assert include_metadata["type"] == "bool"
+    assert include_metadata["default"] is False
+    assert train_dataset_default["include_attribute_metadata"] is False
+
+    dist_impl = train["properties"]["siglip_loss_dist_impl"]
+    assert dist_impl["default"] == "gather"
+    assert dist_impl["enum"] == ["bidir", "shift", "reduce", "gather", "local"]
+    assert train_default["siglip_loss_dist_impl"] == "gather"
+    assert "Metadata masking supports local and gather." in dist_impl["description"]
+
+    mask_mode = train["properties"]["siglip_loss_mask_mode"]
+    assert mask_mode["default"] == "none"
+    assert mask_mode["enum"] == [
+        "none",
+        "attribute_match_ignore",
+        "attribute_plus_accessory_match_ignore",
+    ]
+    assert train_default["siglip_loss_mask_mode"] == "none"
+    assert "Metadata masking supports local and gather." in mask_mode["description"]
+    assert "train.siglip_loss_dist_impl to be 'local' or 'gather'" in mask_mode["description"]
+
+
+def test_clip_metadata_evaluation_schema():
+    """CLIP schemas expose metadata-aware validation and evaluation options."""
+    schema = generate_schema("clip", "evaluate")
+    inference_schema = generate_schema("clip", "inference")
+
+    val = schema["properties"]["dataset"]["properties"]["val"]
+    val_default = schema["default"]["dataset"]["val"]
+    evaluate = schema["properties"]["evaluate"]
+    evaluate_default = schema["default"]["evaluate"]
+    inference = inference_schema["properties"]["inference"]
+    inference_default = inference_schema["default"]["inference"]
+
+    metadata_match_eval = val["properties"]["metadata_match_eval"]
+    assert metadata_match_eval["type"] == "bool"
+    assert metadata_match_eval["default"] is False
+    assert val_default["metadata_match_eval"] is False
+
+    metadata_match_mode = val["properties"]["metadata_match_mode"]
+    assert metadata_match_mode["default"] == "scalar_attributes"
+    assert metadata_match_mode["enum"] == [
+        "scalar_attributes",
+        "scalar_plus_accessories",
+    ]
+    assert val_default["metadata_match_mode"] == "scalar_attributes"
+
+    pas_ground_truth_mode = evaluate["properties"]["pas_ground_truth_mode"]
+    assert pas_ground_truth_mode["default"] == "paired_caption"
+    assert pas_ground_truth_mode["enum"] == [
+        "paired_caption",
+        "scalar_attributes",
+        "scalar_plus_accessories",
+    ]
+    assert evaluate_default["pas_ground_truth_mode"] == "paired_caption"
+    assert "pas_ground_truth_mode" not in inference["properties"]
+    assert "pas_ground_truth_mode" not in inference_default
+
+
+def test_clip_attribute_pairs_file_structured_config():
+    """CLIP dataset items preserve attribute_pairs_file through OmegaConf."""
+    config = OmegaConf.structured(CLIPValDataConfig())
+    config = OmegaConf.merge(
+        config,
+        {
+            "datasets": [
+                {
+                    "image_dir": "/data/images",
+                    "attribute_pairs_file": "/data/test_pairs.json",
+                }
+            ]
+        },
+    )
+
+    serialized = OmegaConf.to_container(config, resolve=True)
+
+    assert serialized["datasets"][0]["attribute_pairs_file"] == "/data/test_pairs.json"

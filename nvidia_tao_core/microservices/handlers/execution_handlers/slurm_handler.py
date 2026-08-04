@@ -2059,7 +2059,8 @@ class SlurmHandler(ExecutionHandler):
                 check=False
             )
 
-            if result.returncode == 0 and result.stdout.strip():
+            squeue_failed = result.returncode != 0
+            if not squeue_failed and result.stdout.strip():
                 status = result.stdout.strip()
                 self.logger.info(f"SLURM job {slurm_job_id} active status: {status}")
                 return status
@@ -2077,7 +2078,8 @@ class SlurmHandler(ExecutionHandler):
                 check=False
             )
 
-            if result.returncode == 0 and result.stdout.strip():
+            sacct_failed = result.returncode != 0
+            if not sacct_failed and result.stdout.strip():
                 # sacct returns multiple lines (parent job + steps), take first non-empty
                 for line in result.stdout.strip().split('\n'):
                     if line.strip():
@@ -2085,6 +2087,14 @@ class SlurmHandler(ExecutionHandler):
                         self.logger.info(f"SLURM job {slurm_job_id} historical status: {status}")
                         return status
 
+            if squeue_failed or sacct_failed:
+                self.logger.error(
+                    "Unable to query SLURM job %s (squeue rc=%s, sacct rc=%s)",
+                    slurm_job_id,
+                    "non-zero" if squeue_failed else "0",
+                    "non-zero" if sacct_failed else "0",
+                )
+                return "ERROR"
             self.logger.warning(f"SLURM job {slurm_job_id} not found in squeue or sacct")
             return "NOT_FOUND"
 
@@ -2982,7 +2992,7 @@ class SlurmHandler(ExecutionHandler):
             if not job_metadata:
                 self.logger.warning(f"No metadata found for job {job_id}")
                 self.logger.info("=" * 80)
-                return True  # Consider it success if job doesn't exist
+                return True
 
             # Check if this is AutoML experiment - get SLURM job ID from controller info
             slurm_job_id = self.get_slurm_job_id(job_id)
@@ -2991,16 +3001,26 @@ class SlurmHandler(ExecutionHandler):
                 self.logger.warning(f"No SLURM job ID found for TAO job {job_id}")
                 self.logger.info("Job may not have been submitted to SLURM yet, or already completed")
                 self.logger.info("=" * 80)
-                return True  # No SLURM job to cancel
+                return True
 
             # Check if job is already completed
             slurm_status = self.get_slurm_job_status(slurm_job_id)
-            if not slurm_status:
-                self.logger.info(f"SLURM job {slurm_job_id} not found (may have already completed)")
+            if slurm_status == "NOT_FOUND":
+                self.logger.info(f"SLURM job {slurm_job_id} is absent from queue and accounting")
                 self.logger.info("=" * 80)
                 return True
 
-            if slurm_status in ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"):
+            if slurm_status == "ERROR":
+                self.logger.error(f"Could not confirm status of SLURM job {slurm_job_id}")
+                self.logger.info("=" * 80)
+                return False
+
+            terminal_states = (
+                "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL",
+                "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "BOOT_FAIL", "DEADLINE",
+            )
+            normalized_status = str(slurm_status).split()[0].split("+", 1)[0]
+            if normalized_status in terminal_states:
                 self.logger.info(f"SLURM job {slurm_job_id} already terminated with status: {slurm_status}")
                 self.logger.info("=" * 80)
                 return True
@@ -3019,13 +3039,39 @@ class SlurmHandler(ExecutionHandler):
             )
 
             if result.returncode == 0:
-                self.logger.info(f"Successfully canceled SLURM job {slurm_job_id}")
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    terminal_status = self.get_slurm_job_status(slurm_job_id)
+                    normalized_terminal_status = (
+                        str(terminal_status).split()[0].split("+", 1)[0]
+                    )
+                    if terminal_status == "ERROR":
+                        self.logger.error(
+                            "Could not confirm terminal status of SLURM job %s",
+                            slurm_job_id,
+                        )
+                        return False
+                    if terminal_status == "NOT_FOUND" or normalized_terminal_status in terminal_states:
+                        self.logger.info(
+                            "SLURM job %s terminated with status: %s",
+                            slurm_job_id,
+                            terminal_status or "NOT_FOUND",
+                        )
+                        self.update_job_status(
+                            job_id,
+                            "CANCELLED",
+                            f"SLURM job {slurm_job_id} canceled by user",
+                        )
+                        self.logger.info("=" * 80)
+                        return True
+                    time.sleep(0.5)
 
-                # Update job message to reflect cancellation
-                self.update_job_status(job_id, "CANCELLED", f"SLURM job {slurm_job_id} canceled by user")
-
+                self.logger.error(
+                    "Timed out waiting for SLURM job %s to terminate after scancel",
+                    slurm_job_id,
+                )
                 self.logger.info("=" * 80)
-                return True
+                return False
 
             error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
             # scancel returns non-zero if job doesn't exist (already terminated)

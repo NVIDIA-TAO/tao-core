@@ -27,6 +27,63 @@ class CuDNNConfig:
 
 
 @dataclass
+class CheckpointerConfig:
+    """Configuration for bounded metric-ranked checkpoint saving."""
+
+    enable_topk: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Enable best-checkpoint saving",
+        description=(
+            "Save checkpoint(s) ranked by a monitored metric. This is additive "
+            "to periodic checkpoints unless replace_periodic is enabled."
+        ),
+    )
+    replace_periodic: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Replace periodic checkpoints",
+        description=(
+            "When best-checkpoint saving is enabled, replace periodic history "
+            "with one metric-best checkpoint and its latest symlink."
+        ),
+    )
+    monitor: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        display_name="Monitored metric",
+        description="Leave unset to use the network's default metric.",
+    )
+    mode: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        valid_options="min,max",
+        display_name="Monitor mode",
+        description="Leave unset to use the network's default direction.",
+    )
+    save_top_k: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=1,
+        display_name="Number of best checkpoints",
+    )
+    filename: str = STR_FIELD(
+        value="model_best_{epoch:03d}",
+        default_value="model_best_{epoch:03d}",
+        display_name="Best-checkpoint filename pattern",
+    )
+    dirpath: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        description="Directory for best checkpoints. Defaults to results_dir.",
+    )
+    auto_insert_metric_name: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+    )
+
+
+@dataclass
 class TrainConfig:
     """Common train experiment config."""
 
@@ -104,6 +161,7 @@ class TrainConfig:
         description="""
         Path to where all the assets generated from a task are stored.
         """)
+    checkpointer: CheckpointerConfig = DATACLASS_FIELD(CheckpointerConfig())
 
 
 @dataclass

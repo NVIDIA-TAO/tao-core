@@ -1198,9 +1198,12 @@ class ExecutionHandler(ABC):
             )
             if not handler:
                 logger.error(f"Unable to determine appropriate handler for backend '{BACKEND}' and job_id '{job_id}'")
-                return True
-            handler.delete(job_id)
-            return True
+                return False
+            result = handler.delete(job_id)
+            # Backends that can confirm termination return a boolean. Preserve
+            # compatibility with legacy handlers that return None on success,
+            # but never discard an explicit cancellation failure.
+            return result is not False
 
         except Exception as e:
             logger.error(f"Failed to delete job {job_id}: {str(e)}")
@@ -1414,7 +1417,7 @@ class ExecutionHandler(ABC):
             handler = ExecutionHandler.create_handler(backend=BACKEND, job_id=job_name)
             if not handler:
                 logger.error(f"Unable to determine appropriate handler for backend '{BACKEND}' and job_id '{job_name}'")
-                return True
+                return False
             if handler.backend_type == Backend.LOCAL_K8S:
                 from .kubernetes_handler import KubernetesHandler
                 k8s_handler = KubernetesHandler()
@@ -1429,9 +1432,12 @@ class ExecutionHandler(ABC):
                 else:
                     k8s_handler.delete_service(job_id=job_name, service_type="flask")
                     k8s_handler.delete_job(job_name)
-            else:
-                handler.delete(job_name)
-            return True
+                # Kubernetes deletion is asynchronous; callers that need a
+                # quiescence barrier must follow this accepted request with
+                # ``wait_for_job_termination``.
+                return True
+            result = handler.delete(job_name)
+            return result is not False
         except Exception as e:
             logger.error(f"Failed to delete job {job_name}: {str(e)}")
             logger.error(traceback.format_exc())
