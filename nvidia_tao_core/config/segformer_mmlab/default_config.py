@@ -523,6 +523,8 @@ class SFOptimConfig:
         math_cond="> 0.0",
         display_name="weight decay",
         description="The weight decay coefficient.",
+        valid_min=0.0,
+        valid_max=1.0,
         automl_enabled="TRUE"
     )
     paramwise_cfg: ParamwiseConfig = DATACLASS_FIELD(ParamwiseConfig())

@@ -213,6 +213,7 @@ class RTModelConfig:
         default_value=1,
         description="Numer of encoder layers in the transformer",
         valid_min=1,
+        valid_max=12,
         automl_enabled="TRUE",
         display_name="encoder layers",
     )
@@ -265,6 +266,7 @@ class RTModelConfig:
         default_value=6,
         description="Numer of decoder layers in the transformer",
         valid_min=1,
+        valid_max=12,
         automl_enabled="TRUE",
         display_name="decoder layers",
     )
