@@ -1,20 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""API handlers module - provides direct access to specialized handler classes"""
+"""API handlers with backwards-compatible lazy class imports.
 
-# Import all handlers for direct access
-from .dataset_handler import DatasetHandler
-from .workspace_handler import WorkspaceHandler
-from .experiment_handler import ExperimentHandler
-from .job_handler import JobHandler
-from .spec_handler import SpecHandler
-from .mongo_handler import MongoBackupHandler
-from .model_handler import ModelHandler
+Importing one lightweight handler must not initialize every cloud, database,
+and orchestration handler.  This is important in model action containers,
+which use the inference server but not the TAO API service.
+"""
 
-# Import inference microservice servers
-from .base_inference_microservice_server import BaseInferenceMicroserviceServer
-from .huggingface_inference_microservice_server import HuggingFaceInferenceMicroserviceServer
+from importlib import import_module
 
 # Export all handlers
 __all__ = [
@@ -29,3 +23,30 @@ __all__ = [
     'BaseInferenceMicroserviceServer',
     'HuggingFaceInferenceMicroserviceServer',
 ]
+
+_HANDLERS = {
+    "DatasetHandler": ("dataset_handler", "DatasetHandler"),
+    "WorkspaceHandler": ("workspace_handler", "WorkspaceHandler"),
+    "ExperimentHandler": ("experiment_handler", "ExperimentHandler"),
+    "JobHandler": ("job_handler", "JobHandler"),
+    "SpecHandler": ("spec_handler", "SpecHandler"),
+    "MongoBackupHandler": ("mongo_handler", "MongoBackupHandler"),
+    "ModelHandler": ("model_handler", "ModelHandler"),
+    "BaseInferenceMicroserviceServer": (
+        "base_inference_microservice_server",
+        "BaseInferenceMicroserviceServer",
+    ),
+    "HuggingFaceInferenceMicroserviceServer": (
+        "huggingface_inference_microservice_server",
+        "HuggingFaceInferenceMicroserviceServer",
+    ),
+}
+
+
+def __getattr__(name):
+    if name not in _HANDLERS:
+        raise AttributeError(name)
+    module_name, attribute = _HANDLERS[name]
+    value = getattr(import_module(f"{__name__}.{module_name}"), attribute)
+    globals()[name] = value
+    return value

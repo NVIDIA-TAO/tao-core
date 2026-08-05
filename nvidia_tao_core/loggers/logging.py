@@ -11,7 +11,23 @@ import json
 import logging as _logging
 import os
 
-from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
+
+
+def _status_callback(data_string):
+    """Forward status to the control plane when its optional stack is present.
+
+    File status logging is used inside model containers that intentionally do
+    not install the TAO API server's full cloud, database, and Kubernetes
+    dependency graph.  Importing that graph at module import time made even
+    ``StatusLogger`` unusable in those containers.
+    """
+
+    try:
+        from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
+    except ImportError as exc:
+        logger.debug("TAO control-plane status callback unavailable: %s", exc)
+        return
+    status_callback(data_string)
 
 
 class MessageFormatter(_logging.Formatter):
@@ -192,7 +208,7 @@ class BaseLogger(object):
             if self.is_master:
                 self.log(verbosity_level, data_string)
                 self.flush()
-                status_callback(data_string)
+                _status_callback(data_string)
 
 
 class StatusLogger(BaseLogger):
