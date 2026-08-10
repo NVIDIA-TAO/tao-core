@@ -164,7 +164,7 @@ def test_all_models_automl_fields_have_valid_min_max():
             models_with_automl += 1
 
         # Check each field for valid_min and valid_max
-        for model, field_name, field_obj, metadata in automl_numeric_fields:
+        for model, field_name, _, metadata in automl_numeric_fields:
             valid_min = metadata.get('valid_min', '')
             valid_max = metadata.get('valid_max', '')
 
@@ -212,7 +212,7 @@ def test_generate_automl_fields_report():
         if automl_numeric_fields:
             models_by_automl_count[model_name] = len(automl_numeric_fields)
 
-            for model, field_name, field_obj, metadata in automl_numeric_fields:
+            for model, field_name, _, metadata in automl_numeric_fields:
                 value_type = metadata.get('value_type', '')
                 valid_min = metadata.get('valid_min', '')
                 valid_max = metadata.get('valid_max', '')
@@ -295,7 +295,7 @@ def test_individual_model_automl_validation(model_name, module_path):
         pytest.skip(f"No automl-enabled numeric fields in {model_name}")
 
     issues = []
-    for model, field_name, field_obj, metadata in automl_numeric_fields:
+    for _, field_name, _, metadata in automl_numeric_fields:
         valid_min = metadata.get('valid_min', '')
         valid_max = metadata.get('valid_max', '')
 
