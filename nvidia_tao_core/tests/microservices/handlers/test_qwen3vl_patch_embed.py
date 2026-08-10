@@ -45,3 +45,21 @@ def test_qwen3vl_patch_embed_workaround_is_idempotent():
     server._apply_qwen3vl_cudnn_workaround()
 
     assert qwen3vl_patch_embed.forward is patched_forward
+
+
+def test_linear_patch_embed_math_is_covered_without_transformers():
+    """The cuDNN replacement remains tested when Transformers is absent."""
+    module = SimpleNamespace(
+        in_channels=3,
+        temporal_patch_size=2,
+        patch_size=4,
+        proj=torch.nn.Linear(3 * 2 * 4 * 4, 8),
+    )
+    hidden_states = torch.randn(5 * 3 * 2 * 4 * 4, requires_grad=True)
+
+    output = server._linear_patch_embed_forward(module, hidden_states)
+    output.sum().backward()
+
+    assert output.shape == (5, 8)
+    assert hidden_states.grad is not None
+    assert module.proj.weight.grad is not None
