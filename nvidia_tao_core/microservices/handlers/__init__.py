@@ -7,6 +7,7 @@ Importing one lightweight handler must not initialize every cloud, database,
 and orchestration handler.  This is important in model action containers,
 which use the inference server but not the TAO API service.
 """
+# pylint: disable=undefined-all-variable
 
 from importlib import import_module
 

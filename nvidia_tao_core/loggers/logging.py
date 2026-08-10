@@ -20,7 +20,6 @@ def _status_callback(data_string):
     dependency graph.  Importing that graph at module import time made even
     ``StatusLogger`` unusable in those containers.
     """
-
     try:
         from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
     except ImportError as exc:

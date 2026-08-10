@@ -7,7 +7,7 @@ import sys
 
 
 def test_handlers_package_does_not_eagerly_import_api_handlers() -> None:
-    import nvidia_tao_core.microservices.handlers  # noqa: F401
+    import nvidia_tao_core.microservices.handlers  # noqa: F401  # pylint: disable=unused-import
 
     assert "nvidia_tao_core.microservices.handlers.dataset_handler" not in sys.modules
     assert "nvidia_tao_core.microservices.handlers.job_handler" not in sys.modules
