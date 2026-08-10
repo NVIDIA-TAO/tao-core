@@ -12,7 +12,6 @@ import logging as _logging
 import os
 
 
-
 def _status_callback(data_string):
     """Forward status to the control plane when its optional stack is present.
 
