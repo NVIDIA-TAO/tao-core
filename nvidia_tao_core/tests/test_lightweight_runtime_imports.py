@@ -2,15 +2,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import builtins
+import importlib
 import json
 import sys
 
 
 def test_handlers_package_does_not_eagerly_import_api_handlers() -> None:
-    import nvidia_tao_core.microservices.handlers  # noqa: F401  # pylint: disable=unused-import
-
-    assert "nvidia_tao_core.microservices.handlers.dataset_handler" not in sys.modules
-    assert "nvidia_tao_core.microservices.handlers.job_handler" not in sys.modules
+    package_name = "nvidia_tao_core.microservices.handlers"
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == package_name or name.startswith(f"{package_name}.")
+    }
+    for name in previous_modules:
+        sys.modules.pop(name, None)
+    try:
+        importlib.import_module(package_name)
+        assert f"{package_name}.dataset_handler" not in sys.modules
+        assert f"{package_name}.job_handler" not in sys.modules
+    finally:
+        for name in list(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
 
 
 def test_file_status_logger_survives_missing_control_plane_dependencies(tmp_path, monkeypatch) -> None:
