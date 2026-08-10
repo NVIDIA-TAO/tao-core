@@ -5,21 +5,28 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from nvidia_tao_core.microservices.handlers import (
     huggingface_inference_microservice_server as server,
 )
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchEmbed
+
+
+def _qwen3vl_patch_embed_class():
+    """Load the optional Transformers implementation used by this regression."""
+    module = pytest.importorskip("transformers.models.qwen3_vl.modeling_qwen3_vl")
+    return module.Qwen3VLVisionPatchEmbed
 
 
 def test_qwen3vl_patch_embed_workaround_supports_backward():
+    qwen3vl_patch_embed = _qwen3vl_patch_embed_class()
     config = SimpleNamespace(
         patch_size=4,
         temporal_patch_size=2,
         in_channels=3,
         hidden_size=8,
     )
-    module = Qwen3VLVisionPatchEmbed(config)
+    module = qwen3vl_patch_embed(config)
     hidden_states = torch.randn(5 * 3 * 2 * 4 * 4, requires_grad=True)
 
     output = module(hidden_states)
@@ -32,8 +39,9 @@ def test_qwen3vl_patch_embed_workaround_supports_backward():
 
 
 def test_qwen3vl_patch_embed_workaround_is_idempotent():
-    patched_forward = Qwen3VLVisionPatchEmbed.forward
+    qwen3vl_patch_embed = _qwen3vl_patch_embed_class()
+    patched_forward = qwen3vl_patch_embed.forward
 
     server._apply_qwen3vl_cudnn_workaround()
 
-    assert Qwen3VLVisionPatchEmbed.forward is patched_forward
+    assert qwen3vl_patch_embed.forward is patched_forward
