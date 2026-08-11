@@ -520,6 +520,8 @@ class SFOptimConfig:
     weight_decay: float = FLOAT_FIELD(
         value=5e-4,
         default_value=5e-4,
+        valid_min=0.0,
+        valid_max=1.0,
         math_cond="> 0.0",
         display_name="weight decay",
         description="The weight decay coefficient.",
