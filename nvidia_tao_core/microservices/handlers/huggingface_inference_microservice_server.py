@@ -40,34 +40,43 @@ logging.getLogger('nvidia_tao_core').setLevel(tao_log_level)
 logger = logging.getLogger(__name__)
 
 
+def _linear_patch_embed_forward(self, hidden_states):
+    """Apply Qwen3-VL patch projection without invoking Conv3d."""
+    import torch.nn.functional as F
+
+    target_dtype = self.proj.weight.dtype
+    hidden_states = hidden_states.view(
+        -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
+    )
+    flattened_inputs = hidden_states.to(dtype=target_dtype).flatten(1)
+    flattened_weights = self.proj.weight.flatten(1)
+    return F.linear(flattened_inputs, flattened_weights, self.proj.bias)
+
+
+_linear_patch_embed_forward._tao_linear_patch_embed = True
+
+
 def _apply_qwen3vl_cudnn_workaround() -> None:
     # cuDNN 9.20 on sm_80 (A100) has no Conv3d engine for kernel spatial size
     # >= 16 in bf16/fp16 with the default NCDHW layout — Qwen3-VL's PatchEmbed
     # (patch_size=16, temporal_patch_size=2) hits this exactly and raises
     # "GET was unable to find an engine to execute this computation". cuDNN's
-    # NDHWC engines cover the same shape, so running the conv in
-    # channels_last_3d memory format avoids the gap without touching dtype.
+    # Avoid cuDNN for this non-overlapping patch projection. Flattening each
+    # patch and the Conv3d kernel gives the exact same affine operation and,
+    # unlike the channels-last Conv3d workaround, supports both forward and
+    # backward on the affected release runtime.
     try:
-        import torch
-        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchEmbed
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+            Qwen3VLVisionPatchEmbed,
+        )
     except ImportError:
         return
 
-    if getattr(Qwen3VLVisionPatchEmbed.forward, "_tao_channels_last_3d", False):
+    if getattr(Qwen3VLVisionPatchEmbed.forward, "_tao_linear_patch_embed", False):
         return
 
-    def forward(self, hidden_states):
-        target_dtype = self.proj.weight.dtype
-        hidden_states = hidden_states.view(
-            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size,
-        ).to(dtype=target_dtype, memory_format=torch.channels_last_3d)
-        if not self.proj.weight.is_contiguous(memory_format=torch.channels_last_3d):
-            self.proj.weight.data = self.proj.weight.data.to(memory_format=torch.channels_last_3d)
-        return self.proj(hidden_states).reshape(-1, self.embed_dim)
-
-    forward._tao_channels_last_3d = True
-    Qwen3VLVisionPatchEmbed.forward = forward
-    logger.info("Applied channels_last_3d workaround for Qwen3-VL PatchEmbed (cuDNN 9.20 conv3d gap)")
+    Qwen3VLVisionPatchEmbed.forward = _linear_patch_embed_forward
+    logger.info("Applied linear Qwen3-VL PatchEmbed workaround for the cuDNN 9.20 Conv3d gap")
 
 
 _apply_qwen3vl_cudnn_workaround()
