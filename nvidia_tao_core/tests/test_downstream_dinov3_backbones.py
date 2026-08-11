@@ -20,9 +20,8 @@ from nvidia_tao_core.config.visual_changenet.default_config import (
     BackboneConfig as ChangeNetBackboneConfig,
 )
 
-# The DINOv3 backbones registered for dense downstream tasks in tao-pytorch.
-# 7B is intentionally excluded - not a registered downstream backbone.
-DINOV3_DOWNSTREAM_BACKBONES = [
+# DINOv3 backbones shared by SegFormer and Visual ChangeNet in tao-pytorch.
+DINOV3_SHARED_BACKBONES = [
     "vit_small_dinov3",
     "vit_small_plus_dinov3",
     "vit_base_dinov3",
@@ -44,5 +43,11 @@ def _backbone_type_options(backbone_config_cls):
 )
 def test_dinov3_backbones_present(backbone_config_cls):
     options = _backbone_type_options(backbone_config_cls)
-    missing = [b for b in DINOV3_DOWNSTREAM_BACKBONES if b not in options]
+    missing = [b for b in DINOV3_SHARED_BACKBONES if b not in options]
     assert not missing, f"config backbone enum missing DINOv3 options: {missing}"
+
+
+def test_visual_changenet_has_7b_dinov3():
+    """Visual ChangeNet additionally supports the DINOv3 7B variant."""
+    options = _backbone_type_options(ChangeNetBackboneConfig)
+    assert "vit_7b_dinov3" in options
