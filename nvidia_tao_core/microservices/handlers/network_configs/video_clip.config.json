@@ -1,0 +1,58 @@
+{
+    "api_params": {
+        "dataset_type": "video_text",
+        "actions": ["train", "evaluate", "export", "inference"],
+        "formats": ["vadr1_chunks", "flat_json", "jsonl", "msrvtt"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference"
+        }
+    },
+    "metrics": {
+        "available_metrics": [
+            "val/i2t_mAP",
+            "val/i2t_R@1",
+            "val/i2t_R@5",
+            "val/t2i_mAP",
+            "val/t2i_R@1",
+            "val/t2i_R@5",
+            "test/i2t_mAP",
+            "test/i2t_R@1",
+            "test/i2t_R@5",
+            "test/t2i_mAP",
+            "test/t2i_R@1",
+            "test/t2i_R@5"
+        ],
+        "monitoring_metric": "val/t2i_mAP"
+    },
+    "spec_params": {
+        "train": {
+            "results_dir": "output_dir",
+            "train.pretrained_model_path": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model",
+            "encryption_key": "key"
+        },
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "encryption_key": "key"
+        },
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file",
+            "encryption_key": "key"
+        },
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "encryption_key": "key"
+        }
+    },
+    "companion_onnx_bin_download": true
+}
