@@ -702,34 +702,118 @@ class PolicyConfig:
 
 @dataclass
 class VisionConfig:
-    """Vision config."""
+    """Vision options forwarded to the Cosmos-RL/DAFT media loader."""
 
-    fps: int = INT_FIELD(
+    fps: Optional[float] = FLOAT_FIELD(
         value=None,
         default_value=None,
-        valid_min=1,
-        valid_max=3,
+        valid_min=0.01,
+        valid_max="inf",
         display_name="FPS",
-        description="Frames per second for vision processing.",
+        description=(
+            "Frames per second sampled from each video. Mutually exclusive "
+            "with nframes. min_frames and max_frames apply only in FPS mode."
+        ),
         automl_enabled="TRUE"
     )
 
-    total_pixels: int = INT_FIELD(
+    nframes: Optional[int] = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Number of frames",
+        description=(
+            "Number of frames sampled uniformly from each video. Mutually "
+            "exclusive with fps."
+        )
+    )
+
+    min_frames: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Minimum frames",
+        description="Minimum sampled frames per video when fps is used."
+    )
+
+    max_frames: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Maximum frames",
+        description="Maximum sampled frames per video when fps is used."
+    )
+
+    video_start: Optional[float] = FLOAT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Video start",
+        description="Optional start time in seconds for video sampling."
+    )
+
+    video_end: Optional[float] = FLOAT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Video end",
+        description="Optional end time in seconds for video sampling."
+    )
+
+    resized_height: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Resized height",
+        description=(
+            "Explicit resized video-frame height. Set together with "
+            "resized_width."
+        )
+    )
+
+    resized_width: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Resized width",
+        description=(
+            "Explicit resized video-frame width. Set together with "
+            "resized_height."
+        )
+    )
+
+    min_pixels: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Minimum pixels",
+        description="Minimum per-frame pixel budget for vision processing."
+    )
+
+    max_pixels: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Maximum pixels",
+        description="Maximum per-frame pixel budget for vision processing."
+    )
+
+    total_pixels: Optional[int] = INT_FIELD(
         value=None,
         default_value=None,
         valid_min=1,
         valid_max="inf",
         display_name="Total pixels",
         description="Total number of pixels for vision processing."
-    )
-
-    nframes: int = INT_FIELD(
-        value=8,
-        default_value=8,
-        valid_min=1,
-        valid_max=8,
-        display_name="Number of frames",
-        description="Number of frames for vision processing."
     )
 
 

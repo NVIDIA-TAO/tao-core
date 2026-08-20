@@ -41,7 +41,18 @@ class InferenceConfig:
         default_value=4,
         value=4,
         display_name="FPS",
-        description="FPS for inference"
+        description="FPS for inference. Mutually exclusive with num_frames."
+    )
+    num_frames: Optional[int] = INT_FIELD(
+        default_value=None,
+        value=None,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Number of frames",
+        description=(
+            "Uniformly sample this many frames from each video. Mutually "
+            "exclusive with fps."
+        )
     )
     total_pixels: Optional[int] = INT_FIELD(
         default_value=6422528,
