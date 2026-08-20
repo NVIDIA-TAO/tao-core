@@ -18,6 +18,8 @@ from nvidia_tao_core.config.dinov3.default_config import (
     DINOv3TrainExpConfig,
     DINOv3TransformConfig,
     ExperimentConfig,
+    LoRAConfig,
+    PreservationConfig,
     SUPPORTED_BACKBONES,
     SUPPORTED_IMAGE_SIZES,
     map_params,
@@ -58,6 +60,34 @@ def test_cudnn_defaults_match_dinov3_templates():
     assert cudnn["properties"]["deterministic"]["default"] is False
     assert cudnn["properties"]["deterministic"]["description"]
     assert cudnn["properties"]["deterministic"]["title"] == "CuDNN deterministic"
+
+
+def test_logging_interval_defaults_to_every_step():
+    """Short DINOv3 runs publish component losses without extra overrides."""
+    config = ExperimentConfig()
+    assert config.train.log_every_n_steps == 1
+
+    field = DINOv3TrainExpConfig.__dataclass_fields__["log_every_n_steps"]
+    assert field.metadata["valid_min"] == 1
+    schema = create_json_schema(dataclass_to_json(config))
+    logging_interval = schema["properties"]["train"]["properties"]["log_every_n_steps"]
+    assert logging_interval["default"] == 1
+
+
+def test_lora_and_preservation_schema_match_runtime_config():
+    """Generated schemas expose the complete runtime adaptation controls."""
+    config = ExperimentConfig()
+    assert config.model.lora == LoRAConfig()
+    assert config.model.preservation == PreservationConfig()
+
+    schema = create_json_schema(dataclass_to_json(config))
+    model = schema["properties"]["model"]["properties"]
+    assert set(model["lora"]["properties"]) == {
+        "enable", "rank", "alpha", "dropout", "target_modules", "num_last_blocks"
+    }
+    assert set(model["preservation"]["properties"]) == {
+        "enable", "cls_mse_weight", "cls_cosine_weight"
+    }
 
 
 def test_pretrained_model_path_description_is_dinov3_specific():
