@@ -8,6 +8,10 @@ schemas in tao-skills-external and must stay aligned with
 ``nvidia_tao_pytorch.config.dinov3.default_config`` (bug 6465432).
 """
 
+from dataclasses import asdict, fields
+
+import pytest
+
 from nvidia_tao_core.api_utils.dataclass2json_converter import (
     create_json_schema,
     dataclass_to_json,
@@ -88,6 +92,26 @@ def test_lora_and_preservation_schema_match_runtime_config():
     assert set(model["preservation"]["properties"]) == {
         "enable", "cls_mse_weight", "cls_cosine_weight"
     }
+
+
+@pytest.mark.parametrize(
+    ("config_name", "core_config"),
+    (("LoRAConfig", LoRAConfig), ("PreservationConfig", PreservationConfig)),
+)
+def test_adaptation_defaults_match_tao_pytorch_when_available(
+    config_name, core_config
+):
+    """Keep tao-core's schema source aligned with the optional runtime package."""
+    runtime = pytest.importorskip(
+        "nvidia_tao_pytorch.config.dinov3.default_config",
+        reason="tao-pytorch is not installed in tao-core-only environments",
+    )
+    runtime_config = getattr(runtime, config_name)
+
+    assert [field.name for field in fields(core_config)] == [
+        field.name for field in fields(runtime_config)
+    ]
+    assert asdict(core_config()) == asdict(runtime_config())
 
 
 def test_pretrained_model_path_description_is_dinov3_specific():
