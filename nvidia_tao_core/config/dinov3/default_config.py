@@ -10,15 +10,16 @@ subclassing the nvdinov2 dataclasses. Only the genuinely new pieces are added he
 * a v3 ``map_params`` table with **patch-16** ViT entries (vit_s, vit_s_plus, vit_b, vit_l,
   vit_h_plus, vit_7b),
 * RoPE backbone fields (``rope_theta`` etc.) and patch-16 defaults,
-* a ``GramConfig`` for Gram anchoring (wired up in a later step), and
-* a disabled ``lora`` stub for forward-compatibility.
+* a ``GramConfig`` for Gram anchoring, and
+* ``LoRAConfig`` / ``PreservationConfig`` for parameter-efficient, geometry-preserving
+  continual pre-training.
 
 DINOv3 is Meta IP implemented inside TAO; the family/endpoint is named ``dinov3``
 (not ``nvdinov3``). ``nvdinov2`` stays frozen.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from omegaconf import MISSING
 
@@ -27,6 +28,7 @@ from nvidia_tao_core.config.utils.types import (
     INT_FIELD,
     FLOAT_FIELD,
     BOOL_FIELD,
+    LIST_FIELD,
     DATACLASS_FIELD,
 )
 from nvidia_tao_core.config.nvdinov2.default_config import (
@@ -269,36 +271,104 @@ class GramConfig:
 
 @dataclass
 class LoRAConfig:
-    """Disabled LoRA stub for forward-compatibility (parameter-efficient SSL, Phase 2)."""
+    """LoRA config for parameter-efficient continual pre-training.
+
+    When enabled, the targeted projections of the student and EMA-teacher backbones are
+    replaced by key-preserving LoRA layers. Adapters are folded into the base weights on
+    conversion and export, so the resulting artifact is a stock DINOv3 backbone.
+    """
 
     enable: bool = BOOL_FIELD(
         value=False,
         default_value=False,
-        description="Whether to apply LoRA adapters (disabled in v1)",
+        description="Whether to apply LoRA adapters to the backbone (parameter-efficient SSL)",
         display_name="enable lora",
-        popular="no"
+        popular="yes"
     )
     rank: int = INT_FIELD(
         value=8,
         default_value=8,
         valid_min=1,
         valid_max="inf",
-        description="LoRA rank",
+        description="LoRA rank (r). The low-rank update is dW = (alpha/r) * B @ A.",
         display_name="lora rank",
-        popular="no"
+        popular="yes"
     )
     alpha: float = FLOAT_FIELD(
         value=16.0,
         default_value=16.0,
-        description="LoRA scaling alpha",
+        description="LoRA scaling alpha; the applied scale is alpha / rank.",
         display_name="lora alpha",
+        popular="yes"
+    )
+    dropout: float = FLOAT_FIELD(
+        value=0.05,
+        default_value=0.05,
+        valid_min=0.0,
+        valid_max=1.0,
+        description="Dropout applied to the LoRA branch input only (the frozen base path is untouched).",
+        display_name="lora dropout",
         popular="no"
+    )
+    target_modules: List[str] = LIST_FIELD(
+        arrList=["qkv", "proj"],
+        default_value=["qkv", "proj"],
+        description=(
+            "Projections to adapt inside each targeted ViT block. 'qkv' and 'proj' are the "
+            "attention projections (the v1 default); 'fc1'/'fc2' additionally adapt the FFN. "
+            "SwiGLU backbones (ViT-S+/H+/7B) expose a fused fc1 and are deferred in v1."
+        ),
+        display_name="lora target modules",
+        popular="yes"
+    )
+    num_last_blocks: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description="Adapt only the last N transformer blocks. 0 = all blocks.",
+        display_name="lora num last blocks",
+        popular="yes"
+    )
+
+
+@dataclass
+class PreservationConfig:
+    """CLS-token preservation against the frozen anchor teacher."""
+
+    enable: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Whether to add CLS-token preservation losses against the frozen anchor teacher. "
+            "Recommended alongside LoRA for continual pre-training."
+        ),
+        display_name="enable preservation",
+        popular="yes"
+    )
+    cls_mse_weight: float = FLOAT_FIELD(
+        value=0.05,
+        default_value=0.05,
+        valid_min=0.0,
+        valid_max="inf",
+        description="Weight of the CLS-token MSE preservation term (0 disables just this term).",
+        display_name="cls mse weight",
+        popular="yes"
+    )
+    cls_cosine_weight: float = FLOAT_FIELD(
+        value=0.05,
+        default_value=0.05,
+        valid_min=0.0,
+        valid_max="inf",
+        description="Weight of the CLS-token cosine preservation term (0 disables just this term).",
+        display_name="cls cosine weight",
+        popular="yes"
     )
 
 
 @dataclass
 class DINOv3ModelConfig:
-    """DINOv3 model config (reuses nvdinov2 distill/head, adds gram + lora)."""
+    """DINOv3 model config with Gram, LoRA, and preservation options."""
 
     centering_method: str = STR_FIELD(
         value="sinkhorn",
@@ -330,7 +400,11 @@ class DINOv3ModelConfig:
     )
     lora: LoRAConfig = DATACLASS_FIELD(
         LoRAConfig(),
-        description="Disabled LoRA stub for forward-compatibility"
+        description="Configuration for LoRA parameter-efficient continual pre-training"
+    )
+    preservation: PreservationConfig = DATACLASS_FIELD(
+        PreservationConfig(),
+        description="Configuration for CLS-token preservation against the frozen anchor teacher"
     )
 
 
@@ -426,6 +500,14 @@ class DINOv3TrainExpConfig(NVDINOv2TrainExpConfig):
         ),
         display_name="distributed strategy",
         popular="yes"
+    )
+    log_every_n_steps: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=1,
+        description="Number of training steps between logger updates.",
+        display_name="logging interval",
+        popular="no",
     )
     cudnn: DINOv3CuDNNConfig = DATACLASS_FIELD(
         DINOv3CuDNNConfig(),
