@@ -51,7 +51,7 @@ def get_network_actions(network_name):
         return ["train", "evaluate", "export", "inference"]
 
     try:
-        with open(config_file, 'r') as f:
+        with open(config_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
         return config.get("api_params", {}).get("actions", ["train", "evaluate", "export", "inference"])
     except (json.JSONDecodeError, KeyError):
