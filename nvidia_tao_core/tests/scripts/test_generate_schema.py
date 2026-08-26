@@ -139,15 +139,13 @@ def test_clip_peft_and_regularization_schema():
         tower = peft["properties"][tower_name]
         tower_default = peft_default[tower_name]
         assert tower["properties"]["mode"]["enum"] == [
-            "legacy",
             "frozen",
             "full",
             "lora",
         ]
-        assert tower["properties"]["mode"]["default"] == "legacy"
-        assert tower_default["mode"] == "legacy"
-        assert "enabled" in tower["properties"]
-        assert "default" not in tower["properties"]["enabled"]
+        assert tower["properties"]["mode"]["default"] == "frozen"
+        assert tower_default["mode"] == "frozen"
+        assert "enabled" not in tower["properties"]
         assert "enabled" not in tower_default
         assert "nn.MultiheadAttention" in tower["properties"]["target_modules"]["description"]
 
