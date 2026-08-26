@@ -54,3 +54,8 @@ class OneFormerEvaluateConfig(EvaluateConfig):
         description="Whether to log the IoU per class.",
         display_name="IoU per class",
     )
+    task: str = STR_FIELD(
+        value="semantic",
+        description="Evaluation task: 'semantic' or 'panoptic'.",
+        display_name="Evaluation task",
+    )
