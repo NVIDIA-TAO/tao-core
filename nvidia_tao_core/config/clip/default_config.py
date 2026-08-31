@@ -104,6 +104,145 @@ class CLIPModelConfig:
 
 
 # =============================================================================
+# PEFT Config
+# =============================================================================
+@dataclass
+class CLIPLoRATargetConfig:
+    """Adaptation configuration for a single encoder tower (vision or text).
+
+    Controls whether a tower is frozen, fully trainable, or adapted with LoRA.
+    """
+
+    mode: str = STR_FIELD(
+        value="frozen",
+        default_value="frozen",
+        valid_options="frozen,full,lora",
+        description=(
+            "Tower adaptation mode. 'frozen' leaves the tower fixed; 'full' "
+            "trains all tower parameters; 'lora' trains only injected LoRA "
+            "parameters."
+        ),
+        display_name="Adaptation Mode",
+    )
+    target_modules: List[str] = LIST_FIELD(
+        arrList=["q_proj", "k_proj", "v_proj", "out_proj"],
+        default_value=["q_proj", "k_proj", "v_proj", "out_proj"],
+        description="Module leaf names to target for LoRA injection. "
+                    "SigLIP2: 'q_proj', 'k_proj', 'v_proj', 'out_proj'. "
+                    "RADIO: 'qkv', 'proj' (fused attention). OpenCLIP uses "
+                    "nn.MultiheadAttention and does not support LoRA mode yet; "
+                    "use mode 'full' or 'frozen'.",
+        display_name="Target Modules",
+    )
+    num_last_blocks: int = INT_FIELD(
+        value=3,
+        default_value=3,
+        valid_min=0,
+        description="Number of final transformer blocks to adapt. "
+                    "0 means adapt all blocks.",
+        display_name="Number of Last Blocks",
+    )
+    rank: int = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=1,
+        description="LoRA rank (low-rank dimension).",
+        display_name="Rank",
+    )
+    alpha: int = INT_FIELD(
+        value=16,
+        default_value=16,
+        valid_min=1,
+        description="LoRA alpha scaling factor. Effective scale = alpha / rank.",
+        display_name="Alpha",
+    )
+    dropout: float = FLOAT_FIELD(
+        value=0.05,
+        default_value=0.05,
+        valid_min=0.0,
+        valid_max=1.0,
+        description="Dropout applied to LoRA input.",
+        display_name="Dropout",
+    )
+
+
+@dataclass
+class CLIPPEFTConfig:
+    """Parameter-efficient fine-tuning configuration for CLIP."""
+
+    enabled: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable PEFT mode. When False, training uses standard "
+                    "full fine-tuning (existing behavior).",
+        display_name="Enabled",
+    )
+    method: str = STR_FIELD(
+        value="lora",
+        default_value="lora",
+        valid_options="lora",
+        description="PEFT method. Currently only 'lora' is supported.",
+        display_name="Method",
+    )
+    train_logit_calibration: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description=(
+            "Train logit_scale and optional logit_bias while PEFT is enabled. "
+            "Defaults to True to preserve existing LoRA behavior."
+        ),
+        display_name="Train Logit Calibration",
+    )
+    vision: CLIPLoRATargetConfig = DATACLASS_FIELD(
+        CLIPLoRATargetConfig(),
+        description="LoRA configuration for the vision encoder.",
+    )
+    text: CLIPLoRATargetConfig = DATACLASS_FIELD(
+        CLIPLoRATargetConfig(),
+        description="LoRA configuration for the text encoder.",
+    )
+
+
+# =============================================================================
+# Regularization Config
+# =============================================================================
+@dataclass
+class CLIPRegularizationConfig:
+    """Geometry-preserving regularization for domain adaptation."""
+
+    enabled: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable preservation regularization. When False, "
+                    "only the contrastive loss is used (existing behavior).",
+        display_name="Enabled",
+    )
+    embedding_mse_weight: float = FLOAT_FIELD(
+        value=0.05,
+        default_value=0.05,
+        valid_min=0.0,
+        description="Weight for MSE loss between student and teacher embeddings.",
+        display_name="Embedding MSE Weight",
+    )
+    cosine_weight: float = FLOAT_FIELD(
+        value=0.05,
+        default_value=0.05,
+        valid_min=0.0,
+        description="Weight for cosine preservation loss between "
+                    "student and teacher embeddings.",
+        display_name="Cosine Weight",
+    )
+    similarity_weight: float = FLOAT_FIELD(
+        value=0.10,
+        default_value=0.10,
+        valid_min=0.0,
+        description="Weight for similarity matrix preservation loss "
+                    "(MSE between student and teacher image-text similarity matrices).",
+        display_name="Similarity Weight",
+    )
+
+
+# =============================================================================
 # Dataset Config
 # =============================================================================
 @dataclass
@@ -737,6 +876,16 @@ class CLIPExperimentConfig(CommonExperimentConfig):
     inference: CLIPInferenceEvalConfig = DATACLASS_FIELD(
         CLIPInferenceEvalConfig(),
         description="Inference config.",
+    )
+    peft: CLIPPEFTConfig = DATACLASS_FIELD(
+        CLIPPEFTConfig(),
+        description="Parameter-efficient fine-tuning config (LoRA). "
+                    "Disabled by default.",
+    )
+    regularization: CLIPRegularizationConfig = DATACLASS_FIELD(
+        CLIPRegularizationConfig(),
+        description="Geometry-preserving regularization config. "
+                    "Disabled by default.",
     )
     export: CLIPExportConfig = DATACLASS_FIELD(
         CLIPExportConfig(),

@@ -51,7 +51,7 @@ def get_network_actions(network_name):
         return ["train", "evaluate", "export", "inference"]
 
     try:
-        with open(config_file, 'r') as f:
+        with open(config_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
         return config.get("api_params", {}).get("actions", ["train", "evaluate", "export", "inference"])
     except (json.JSONDecodeError, KeyError):
@@ -122,6 +122,42 @@ def test_clip_train_metadata_masking_schema():
     assert train_default["siglip_loss_mask_mode"] == "none"
     assert "Metadata masking supports local and gather." in mask_mode["description"]
     assert "train.siglip_loss_dist_impl to be 'local' or 'gather'" in mask_mode["description"]
+
+
+def test_clip_peft_and_regularization_schema():
+    """CLIP train schema exposes tower adaptation and preservation options."""
+    schema = generate_schema("clip", "train")
+
+    peft = schema["properties"]["peft"]
+    peft_default = schema["default"]["peft"]
+    assert peft["properties"]["enabled"]["default"] is False
+    assert peft["properties"]["method"]["enum"] == ["lora"]
+    assert peft["properties"]["train_logit_calibration"]["default"] is True
+    assert peft_default["train_logit_calibration"] is True
+
+    for tower_name in ("vision", "text"):
+        tower = peft["properties"][tower_name]
+        tower_default = peft_default[tower_name]
+        assert tower["properties"]["mode"]["enum"] == [
+            "frozen",
+            "full",
+            "lora",
+        ]
+        assert tower["properties"]["mode"]["default"] == "frozen"
+        assert tower_default["mode"] == "frozen"
+        assert "enabled" not in tower["properties"]
+        assert "enabled" not in tower_default
+        assert "nn.MultiheadAttention" in tower["properties"]["target_modules"]["description"]
+
+    regularization = schema["properties"]["regularization"]
+    regularization_default = schema["default"]["regularization"]
+    assert regularization["properties"]["enabled"]["default"] is False
+    assert regularization_default == {
+        "enabled": False,
+        "embedding_mse_weight": 0.05,
+        "cosine_weight": 0.05,
+        "similarity_weight": 0.10,
+    }
 
 
 def test_clip_metadata_evaluation_schema():
