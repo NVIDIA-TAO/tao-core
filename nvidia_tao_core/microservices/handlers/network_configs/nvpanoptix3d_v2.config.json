@@ -1,0 +1,267 @@
+{
+    "api_params": {
+        "dataset_type": "nvpanoptix3d_v2",
+        "actions": [
+            "train",
+            "evaluate",
+            "export",
+            "inference"
+        ],
+        "formats": [
+            "scannetpp",
+            "reasoning_jsonl"
+        ],
+        "accepted_ds_intents": [
+            "training",
+            "evaluation",
+            "testing"
+        ],
+        "image": "TAO_PYTORCH",
+        "spec_backend": "yaml",
+        "actions_pipe": {
+            "train": "train",
+            "evaluate": "evaluate",
+            "export": "export_with_spec",
+            "inference": "inference"
+        }
+    },
+    "dataset_validation": {
+        "required_files": {
+            "scannetpp": [
+                {
+                    "all_of": [
+                        {
+                            "path": "categories.json",
+                            "type": "file"
+                        },
+                        {
+                            "path": "all_metadata.npz",
+                            "type": "file"
+                        },
+                        {
+                            "path": ".",
+                            "type": "regex",
+                            "regex": "*/images/*.jpg"
+                        },
+                        {
+                            "path": ".",
+                            "type": "regex",
+                            "regex": "*/panoptic/*.png"
+                        },
+                        {
+                            "path": ".",
+                            "type": "regex",
+                            "regex": "*/depth/*.png"
+                        }
+                    ]
+                }
+            ],
+            "reasoning_jsonl": [
+                {
+                    "path": "manifest.jsonl",
+                    "type": "file"
+                }
+            ]
+        }
+    },
+    "dynamic_config": {
+        "model_type_key": "model.model_type",
+        "rules": {
+            "panoptic": {
+                "remove": [
+                    "model.reasoning",
+                    "dataset.reasoning",
+                    "train.reasoning",
+                    "inference.save_full_point_cloud"
+                ]
+            },
+            "reasoning": {
+                "remove": [
+                    "model.panoptic",
+                    "dataset.panoptic",
+                    "train.panoptic",
+                    "evaluate.cls_threshold",
+                    "evaluate.overlap_threshold",
+                    "inference.cls_threshold",
+                    "inference.overlap_threshold",
+                    "inference.categories_json",
+                    "export"
+                ]
+            }
+        }
+    },
+    "data_sources": {
+        "train": {
+            "dataset.panoptic.train_preprocessed_root": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "scannetpp"
+                },
+                "path": ""
+            },
+            "dataset.panoptic.val_preprocessed_root": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "scannetpp"
+                },
+                "path": ""
+            },
+            "dataset.reasoning.train_manifest": {
+                "source": "train_datasets",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "reasoning_jsonl"
+                },
+                "path": "manifest.jsonl"
+            },
+            "dataset.reasoning.val_manifest": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "reasoning_jsonl"
+                },
+                "path": "manifest.jsonl"
+            }
+        },
+        "evaluate": {
+            "dataset.panoptic.train_preprocessed_root": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "scannetpp"
+                },
+                "path": ""
+            },
+            "dataset.panoptic.val_preprocessed_root": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "scannetpp"
+                },
+                "path": ""
+            },
+            "dataset.reasoning.train_manifest": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "reasoning_jsonl"
+                },
+                "path": "manifest.jsonl"
+            },
+            "dataset.reasoning.val_manifest": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "reasoning_jsonl"
+                },
+                "path": "manifest.jsonl"
+            }
+        },
+        "export": {
+            "export.categories_json": {
+                "source": "eval_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "scannetpp"
+                },
+                "path": "categories.json",
+                "optional": true
+            }
+        },
+        "inference": {
+            "dataset.panoptic.train_preprocessed_root": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "scannetpp"
+                },
+                "path": ""
+            },
+            "dataset.panoptic.val_preprocessed_root": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "scannetpp"
+                },
+                "path": ""
+            },
+            "dataset.reasoning.train_manifest": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "reasoning_jsonl"
+                },
+                "path": "manifest.jsonl"
+            },
+            "dataset.reasoning.val_manifest": {
+                "source": "inference_dataset",
+                "multiple_sources": false,
+                "conditional": {
+                    "metadata_key": "format",
+                    "equals": "reasoning_jsonl"
+                },
+                "path": "manifest.jsonl"
+            }
+        }
+    },
+    "cloud_upload": {
+        "upload_strategy": {
+            "inference": "tarball_after_completion"
+        },
+        "retain_patterns": {
+            "train": [
+                ".*\\.pth$"
+            ]
+        }
+    },
+    "spec_params": {
+        "train": {
+            "results_dir": "output_dir",
+            "model.backbone.pretrained_backbone_path": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path": "resume_model",
+            "encryption_key": "key"
+        },
+        "evaluate": {
+            "results_dir": "output_dir",
+            "evaluate.checkpoint": "parent_model",
+            "encryption_key": "key"
+        },
+        "export": {
+            "results_dir": "output_dir",
+            "export.checkpoint": "parent_model",
+            "export.onnx_file": "create_onnx_file",
+            "encryption_key": "key"
+        },
+        "inference": {
+            "results_dir": "output_dir",
+            "inference.checkpoint": "parent_model",
+            "encryption_key": "key"
+        }
+    },
+    "metrics": {
+        "available_metrics": [
+            "val/mAP",
+            "val/mAP50",
+            "val/mAP25",
+            "val/mIoU"
+        ],
+        "monitoring_metric": "val/mAP",
+        "dynamic_metric_patterns": [
+            "^(train|val)/loss(_[A-Za-z0-9_]+)?$"
+        ]
+    }
+}
