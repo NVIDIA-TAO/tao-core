@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
 from nvidia_tao_core.config.utils.types import (
+    BOOL_FIELD,
     INT_FIELD,
     STR_FIELD,
     FLOAT_FIELD,
@@ -117,4 +118,14 @@ class Sparse4DTrainConfig(TrainConfig):
         description="Precision",
         display_name="Precision",
         valid_options="bf16,fp16,fp32",
+    )
+    scrub_nan_gradients: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Opt in to classification-logit clipping, non-finite loss recovery, "
+            "and NaN-gradient scrubbing after backward; gradient infinities "
+            "remain visible to mixed-precision overflow detection"
+        ),
+        display_name="Scrub NaN gradients"
     )

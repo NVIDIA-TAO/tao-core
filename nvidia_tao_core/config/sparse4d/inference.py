@@ -9,6 +9,7 @@ from omegaconf import MISSING
 from nvidia_tao_core.config.utils.types import (
     STR_FIELD,
     BOOL_FIELD,
+    FLOAT_FIELD,
     DATACLASS_FIELD
 )
 from nvidia_tao_core.config.sparse4d.dataset import Sparse4DTrackingConfig
@@ -36,6 +37,17 @@ class Sparse4DInferenceConfig(InferenceConfig):
         default_value=True,
         description="Output NVSchema",
         display_name="Output NVSchema"
+    )
+    nvschema_fps: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max="inf",
+        description=(
+            "Frame rate used for NVSchema timestamps; zero uses the "
+            "spatialai-data-utils default"
+        ),
+        display_name="NVSchema frame rate"
     )
     tracking: Sparse4DTrackingConfig = DATACLASS_FIELD(
         Sparse4DTrackingConfig(),
