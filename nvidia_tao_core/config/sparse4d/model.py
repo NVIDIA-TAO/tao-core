@@ -44,6 +44,7 @@ class Sparse4DNeckConfig:
         default_value=4,
         valid_min=1,
         valid_max="inf",
+        description="Number of output levels",
         display_name="Number of output levels"
     )
     start_level: int = INT_FIELD(
@@ -120,6 +121,320 @@ class Sparse4DDepthBranchConfig:
 
 
 @dataclass
+class Sparse4DLooseToTightConfig:
+    """Configuration for loose-to-tight geometric 2D distillation."""
+
+    enable: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable loose-to-tight 2D distillation",
+        display_name="Enable loose-to-tight distillation"
+    )
+    mlp_ckpt: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Path to the trained frozen loose-to-tight MLP checkpoint",
+        display_name="Loose-to-tight MLP checkpoint"
+    )
+    loss_weight: float = FLOAT_FIELD(
+        value=0.1,
+        default_value=0.1,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for supervised loose-to-tight 2D box loss",
+        display_name="Loose-to-tight loss weight"
+    )
+    num_classes: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description=(
+            "Number of classes used by the loose-to-tight MLP; zero derives "
+            "the taxonomy from dataset.classes"
+        ),
+        display_name="Loose-to-tight classes"
+    )
+    tight_l1_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for the tight-box L1 term",
+        display_name="Tight L1 weight"
+    )
+    containment_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for the visible-box containment term",
+        display_name="Containment weight"
+    )
+    box2d_key: str = STR_FIELD(
+        value="gt_boxes_2d_visible",
+        default_value="gt_boxes_2d_visible",
+        description="Batch key for visible 2D ground-truth boxes",
+        display_name="Visible 2D box key"
+    )
+    occ_key: str = STR_FIELD(
+        value="gt_occ_weight",
+        default_value="gt_occ_weight",
+        description="Batch key for 2D occlusion weights",
+        display_name="Occlusion weight key"
+    )
+    instance_id_key: str = STR_FIELD(
+        value="instance_id",
+        default_value="instance_id",
+        description="Batch key for instance identifiers",
+        display_name="Instance ID key"
+    )
+    ego2cam_key: str = STR_FIELD(
+        value="cam2world_transform",
+        default_value="cam2world_transform",
+        description="Batch key for ego-to-camera transforms",
+        display_name="Ego-to-camera key"
+    )
+    min_gt_area: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Minimum visible 2D ground-truth area in pixels",
+        display_name="Minimum 2D GT area"
+    )
+    eps: float = FLOAT_FIELD(
+        value=0.1,
+        default_value=0.1,
+        valid_min=0,
+        valid_max="inf",
+        description="Minimum projection depth used for numerical stability",
+        display_name="Projection epsilon"
+    )
+    pseudo_enable: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable 2D pseudo-label loss for batches without 3D ground truth",
+        display_name="Enable 2D pseudo labels"
+    )
+    det_box_key: str = STR_FIELD(
+        value="det_boxes_2d",
+        default_value="det_boxes_2d",
+        description="Batch key for per-camera 2D detection boxes",
+        display_name="2D detection box key"
+    )
+    det_cls_key: str = STR_FIELD(
+        value="det_classes_2d",
+        default_value="det_classes_2d",
+        description="Batch key for per-camera 2D detection classes",
+        display_name="2D detection class key"
+    )
+    det_score_key: str = STR_FIELD(
+        value="det_scores_2d",
+        default_value="det_scores_2d",
+        description="Batch key for per-camera 2D detection scores",
+        display_name="2D detection score key"
+    )
+    has_3d_gt_key: str = STR_FIELD(
+        value="has_3d_gt",
+        default_value="has_3d_gt",
+        description="Batch key indicating whether a sample has 3D ground truth",
+        display_name="Has 3D ground truth key"
+    )
+    giou_thr: float = FLOAT_FIELD(
+        value=0.3,
+        default_value=0.3,
+        valid_min=-1,
+        valid_max=1,
+        description="Minimum generalized IoU for pseudo-label matching",
+        display_name="Pseudo-match GIoU threshold"
+    )
+    cost_giou: float = FLOAT_FIELD(
+        value=2.0,
+        default_value=2.0,
+        valid_min=0,
+        valid_max="inf",
+        description="GIoU component weight in pseudo-label matching cost",
+        display_name="Pseudo-match GIoU cost"
+    )
+    cost_l1: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="L1 component weight in pseudo-label matching cost",
+        display_name="Pseudo-match L1 cost"
+    )
+    cost_cls: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Classification component weight in pseudo-label matching cost",
+        display_name="Pseudo-match class cost"
+    )
+    det_score_thr: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max=1,
+        description="Minimum 2D detection confidence used for matching",
+        display_name="2D detection score threshold"
+    )
+    min_cams: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=1,
+        valid_max="inf",
+        description="Minimum number of cameras supporting a pseudo match",
+        display_name="Minimum matching cameras"
+    )
+    dedup_dist: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max="inf",
+        description="BEV distance used to deduplicate pseudo matches; zero disables it",
+        display_name="Pseudo-match deduplication distance"
+    )
+    class_gate: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description="Require class agreement during pseudo-label matching",
+        display_name="Pseudo-match class gate"
+    )
+    pseudo_box_weight: float = FLOAT_FIELD(
+        value=0.1,
+        default_value=0.1,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for pseudo-label 2D box loss",
+        display_name="Pseudo 2D box loss weight"
+    )
+    pseudo_cls_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for pseudo-label classification loss",
+        display_name="Pseudo classification loss weight"
+    )
+    sv_depth_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max=1,
+        description="Gradient scale for SV2D metric depth",
+        display_name="SV2D depth gradient weight"
+    )
+    sv_size_weight: float = FLOAT_FIELD(
+        value=0.25,
+        default_value=0.25,
+        valid_min=0,
+        valid_max=1,
+        description="Gradient scale for SV2D 3D box extent",
+        display_name="SV2D size gradient weight"
+    )
+    sv_yaw_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max=1,
+        description="Gradient scale for SV2D yaw",
+        display_name="SV2D yaw gradient weight"
+    )
+
+
+@dataclass
+class Sparse4DSVAuxHeadConfig:
+    """Configuration for the calibration-free single-view auxiliary head."""
+
+    enable: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable the SV2D image-plane auxiliary classifier",
+        display_name="Enable SV auxiliary head"
+    )
+    in_channels: int = INT_FIELD(
+        value=256,
+        default_value=256,
+        valid_min=1,
+        valid_max="inf",
+        description="Number of channels in each FPN input feature",
+        display_name="SV auxiliary input channels"
+    )
+    num_classes: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description=(
+            "Number of classes predicted by the SV auxiliary head; zero "
+            "derives the taxonomy from dataset.classes"
+        ),
+        display_name="SV auxiliary classes"
+    )
+    roi_size: int = INT_FIELD(
+        value=7,
+        default_value=7,
+        valid_min=1,
+        valid_max="inf",
+        description="RoIAlign output size",
+        display_name="SV auxiliary ROI size"
+    )
+    hidden_dim: int = INT_FIELD(
+        value=256,
+        default_value=256,
+        valid_min=1,
+        valid_max="inf",
+        description="Hidden dimension of the SV auxiliary classifier",
+        display_name="SV auxiliary hidden dimension"
+    )
+    fpn_strides: List[int] = LIST_FIELD(
+        arrList=[4, 8, 16, 32],
+        default_value=[4, 8, 16, 32],
+        description="Pixel stride for each FPN level",
+        display_name="SV auxiliary FPN strides"
+    )
+    use_level: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=0,
+        valid_max="inf",
+        description="FPN level used for RoIAlign",
+        display_name="SV auxiliary FPN level"
+    )
+    loss_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for the SV auxiliary classification loss",
+        display_name="SV auxiliary loss weight"
+    )
+    det_box_key: str = STR_FIELD(
+        value="det_boxes_2d",
+        default_value="det_boxes_2d",
+        description="Batch key for SV2D boxes",
+        display_name="SV auxiliary box key"
+    )
+    det_cls_key: str = STR_FIELD(
+        value="det_classes_2d",
+        default_value="det_classes_2d",
+        description="Batch key for SV2D class labels",
+        display_name="SV auxiliary class key"
+    )
+    min_box_size: float = FLOAT_FIELD(
+        value=2.0,
+        default_value=2.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Minimum SV2D box width and height in input pixels",
+        display_name="SV auxiliary minimum box size"
+    )
+
+
+@dataclass
 class Sparse4DInstanceBankConfig:
     """Instance bank configuration for Sparse4D."""
 
@@ -180,6 +495,12 @@ class Sparse4DInstanceBankConfig:
         default_value=False,
         description="Use temporal alignment",
         display_name="Use temporal alignment"
+    )
+    reset_on_time_gap: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Reset recurrent state when timestamps cross a clip boundary",
+        display_name="Reset on time gap"
     )
     grid_size: Optional[float] = FLOAT_FIELD(
         value=None,
@@ -566,6 +887,7 @@ class Sparse4DDeformableModelConfig:
         default_value=256,
         valid_min=1,
         valid_max="inf",
+        display_name="Embedding dimensions",
         description="Embedding dimensions"
     )
     num_groups: int = INT_FIELD(
@@ -573,6 +895,7 @@ class Sparse4DDeformableModelConfig:
         default_value=8,
         valid_min=1,
         valid_max="inf",
+        display_name="Number of groups",
         description="Number of groups"
     )
     num_levels: int = INT_FIELD(
@@ -1018,6 +1341,11 @@ class Sparse4DHeadConfig:
         description="FFN config",
         display_name="FFN config"
     )
+    loose_to_tight: Sparse4DLooseToTightConfig = DATACLASS_FIELD(
+        Sparse4DLooseToTightConfig(),
+        description="Loose-to-tight geometric 2D distillation config",
+        display_name="Loose-to-tight config"
+    )
 
 
 @dataclass
@@ -1081,4 +1409,21 @@ class Sparse4DModelConfig:
         default_value=False,
         description="Use temporal alignment",
         display_name="Use temporal alignment"
+    )
+    cotrain_param_touch: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Keep route-specific parameters in the distributed autograd graph",
+        display_name="Co-training parameter touch"
+    )
+    sv_scene_keywords: List[str] = LIST_FIELD(
+        arrList=["SV2D"],
+        default_value=["SV2D"],
+        description="Scene-name keywords identifying calibration-free SV2D batches",
+        display_name="SV2D scene keywords"
+    )
+    sv_aux_head: Sparse4DSVAuxHeadConfig = DATACLASS_FIELD(
+        Sparse4DSVAuxHeadConfig(),
+        description="Calibration-free single-view auxiliary head config",
+        display_name="SV auxiliary head config"
     )

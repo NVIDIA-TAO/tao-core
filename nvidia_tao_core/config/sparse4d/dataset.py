@@ -3,7 +3,7 @@
 
 """Configuration hyperparameter schema for the dataset."""
 
-from typing import List
+from typing import Dict, List
 from dataclasses import dataclass
 from omegaconf import MISSING
 
@@ -13,6 +13,7 @@ from nvidia_tao_core.config.utils.types import (
     BOOL_FIELD,
     FLOAT_FIELD,
     LIST_FIELD,
+    DICT_FIELD,
     DATACLASS_FIELD
 )
 
@@ -306,8 +307,8 @@ class Omniverse3DDetTrackDatasetConfig:
     use_h5_file_for_rgb: bool = BOOL_FIELD(
         value=False,
         default_value=False,
-        description="Use H5 file for RGB images",
-        display_name="Use H5 file for RGB"
+        description="Read RGB camera images from HDF5 files instead of image directories",
+        display_name="Use HDF5 for RGB images"
     )
     use_h5_file_for_depth: bool = BOOL_FIELD(
         value=True,
@@ -326,7 +327,7 @@ class Omniverse3DDetTrackDatasetConfig:
         default_value=50,
         valid_min=1,
         valid_max="inf",
-        description="Max number of pkl files held in the LRU cache when lazy loading",
+        description="Maximum pkl files held in the lazy-loading LRU cache",
         display_name="Lazy load cache size"
     )
     pkl_sample_size: int = INT_FIELD(
@@ -334,27 +335,27 @@ class Omniverse3DDetTrackDatasetConfig:
         default_value=0,
         valid_min=0,
         valid_max="inf",
-        description="If >0, sample this many pkl files per epoch (balanced by camera count). Requires lazy_load=True.",
+        description="Number of PKLs sampled per epoch; zero disables sampling. Requires lazy_load=True",
         display_name="PKL sample size per epoch"
     )
     pkl_cam_counts_path: str = STR_FIELD(
         value="",
         default_value="",
-        description="Path to pickle mapping pkl_path -> num_cameras for balanced PKL sampling",
+        description="Path to the pkl-to-camera-count mapping used for balanced sampling",
         display_name="PKL camera counts path"
     )
     fps_drop_prob: float = FLOAT_FIELD(
         value=0.0,
         default_value=0.0,
-        valid_min=0,
+        valid_min=0.0,
         valid_max=1.0,
-        description="Probability to downsample a scene to a lower FPS during training data loading",
+        description="Probability of downsampling a training scene to a lower FPS",
         display_name="FPS drop probability"
     )
     target_fps_choices: List[int] = LIST_FIELD(
         arrList=[30, 20, 15, 10, 6, 5, 3, 2, 1],
         default_value=[30, 20, 15, 10, 6, 5, 3, 2, 1],
-        description="List of target FPS values for FPS drop augmentation",
+        description="Candidate target FPS values for FPS-drop augmentation",
         display_name="Target FPS choices"
     )
     max_cameras: int = INT_FIELD(
@@ -362,24 +363,148 @@ class Omniverse3DDetTrackDatasetConfig:
         default_value=-1,
         valid_min=-1,
         valid_max="inf",
-        description=(
-            "If >0, randomly subsample to this many cameras per frame during training to save GPU memory. "
-            "Any value <=0 (e.g., -1 or 0) disables subsampling and uses all cameras."
-        ),
-        display_name="Max cameras per frame"
+        description="Limit training cameras per frame to reduce GPU memory; a non-positive value disables sampling",
+        display_name="Maximum cameras per frame"
     )
     eval_dist_fcn: str = STR_FIELD(
-        value="iou_3d",
-        default_value="iou_3d",
-        description="Distance function for evaluation: 'center_distance', 'iou_3d', or 'both'",
+        value="center_distance",
+        default_value="center_distance",
+        description="Evaluation distance function",
         display_name="Evaluation distance function",
         valid_options="center_distance,iou_3d,both",
     )
     eval_hota: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Run HOTA tracking evaluation in addition to AMOTA",
+        display_name="Enable HOTA evaluation"
+    )
+    ltt_2dgt_sidecar_dir: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Directory of per-scene LooseToTight 2D ground-truth NPZ sidecars",
+        display_name="LTT 2D ground-truth sidecar directory"
+    )
+    ltt_2dgt_frame_regex: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Optional regex used to extract frame IDs for LTT sidecar joins",
+        display_name="LTT frame regex"
+    )
+    ltt_2dgt_dedup_regex: str = STR_FIELD(
+        value=r"^CT[\w.]+?__",
+        default_value=r"^CT[\w.]+?__",
+        description="Regex removed from scene names before resolving LTT sidecars",
+        display_name="LTT scene deduplication regex"
+    )
+    ltt_2dgt_cache_size: int = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=1,
+        valid_max="inf",
+        description="Number of per-scene LTT sidecar indices cached per worker",
+        display_name="LTT sidecar cache size"
+    )
+    ltt_2dgt_warn_on_miss: bool = BOOL_FIELD(
         value=True,
         default_value=True,
-        description="Whether to run HOTA tracking evaluation in addition to AMOTA",
-        display_name="Enable HOTA evaluation"
+        description="Warn once per scene when an LTT sidecar join has no matches",
+        display_name="Warn on LTT sidecar miss"
+    )
+    rtdetr_2d_cache_dir: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Directory of per-scene RT-DETR 2D pseudo-label NPZ caches",
+        display_name="RT-DETR 2D cache directory"
+    )
+    rtdetr_2d_cache_path: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Optional single RT-DETR 2D pseudo-label NPZ cache",
+        display_name="RT-DETR 2D cache path"
+    )
+    rtdetr_2d_dedup_regex: str = STR_FIELD(
+        value=r"^CT[\w.]+?__",
+        default_value=r"^CT[\w.]+?__",
+        description="Regex removed from scene names before resolving RT-DETR caches",
+        display_name="RT-DETR scene deduplication regex"
+    )
+    rtdetr_2d_score_thr: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max=1.0,
+        description="Global score threshold for RT-DETR pseudo-labels",
+        display_name="RT-DETR score threshold"
+    )
+    rtdetr_2d_per_class_score_thr: Dict[str, float] = DICT_FIELD(
+        hashMap={},
+        description="Optional class-name to score-threshold overrides",
+        display_name="RT-DETR per-class score thresholds"
+    )
+    rtdetr_2d_cache_size: int = INT_FIELD(
+        value=4,
+        default_value=4,
+        valid_min=1,
+        valid_max="inf",
+        description="Number of RT-DETR scene indices cached per worker",
+        display_name="RT-DETR cache size"
+    )
+    rtdetr_2d_mark_real: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description="Mark samples with an RT-DETR scene cache as lacking 3D ground truth",
+        display_name="Treat RT-DETR-cached samples as 2D-only"
+    )
+    resize_to_canonical_2d: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Resize explicitly 2D-only training images to the canonical SV2D size",
+        display_name="Enable canonical SV2D resize"
+    )
+    canonical_2d_height: int = INT_FIELD(
+        value=1080,
+        default_value=1080,
+        valid_min=1,
+        valid_max="inf",
+        description="Canonical SV2D image height",
+        display_name="Canonical SV2D height"
+    )
+    canonical_2d_width: int = INT_FIELD(
+        value=1920,
+        default_value=1920,
+        valid_min=1,
+        valid_max="inf",
+        description="Canonical SV2D image width",
+        display_name="Canonical SV2D width"
+    )
+    sync_route: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Keep distributed ranks on the same 3D or 2D supervision route",
+        display_name="Synchronize co-training route"
+    )
+    real_scene_keywords: List[str] = LIST_FIELD(
+        arrList=[],
+        default_value=[],
+        description="Scene-name substrings identifying real 2D-supervised data",
+        display_name="Real scene keywords"
+    )
+    real_block_prob: float = FLOAT_FIELD(
+        value=-1.0,
+        default_value=-1.0,
+        valid_min=-1.0,
+        valid_max=1.0,
+        description="Probability in [0, 1], or exactly -1 for automatic scene-count weighting; (-1, 0) is invalid",
+        display_name="Real route block probability"
+    )
+    scene_switch_iters: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description="Iterations per scene before a synchronized route switch; zero uses legacy cadence",
+        display_name="Scene switch iterations"
     )
     num_frames: int = INT_FIELD(
         value=200,
