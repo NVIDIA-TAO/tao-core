@@ -31,6 +31,8 @@ def generate_schema(neural_network_name, action=""):
             expConfig = imported_module.DataConvertExpConfig()
         elif neural_network_name == "clip":
             expConfig = imported_module.CLIPExperimentConfig()
+        elif neural_network_name == "video_clip":
+            expConfig = imported_module.VideoCLIPExperimentConfig()
         else:
             expConfig = imported_module.ExperimentConfig()
     json_with_meta_config = dataclass2json_converter.dataclass_to_json(expConfig)
