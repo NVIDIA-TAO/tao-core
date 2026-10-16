@@ -7,7 +7,7 @@ TAO_NETWORKS = set([
     "action_recognition", "bevfusion", "classification_pyt", "grounding_dino", "mal", "mask2former",
     "mask_grounding_dino", "ml_recog", "ocdnet", "ocrnet", "optical_inspection", "pointpillars",
     "pose_classification", "re_identification", "centerpose", "visual_changenet_classify",
-    "visual_changenet_segment", "deformable_detr",
+    "visual_changenet_segment", "deformable_detr", "nvpanoptix3d_v2",
     "depth_net_mono", "depth_net_stereo", "dino", "nvpanoptix3d", "rtdetr", "segformer",  # PYT CV MODELS
     "annotations", "analytics", "augmentation", "auto_label", "image"  # Data_Service tasks.
 ])
@@ -24,6 +24,7 @@ _PYT_TAO_NETWORKS = set([
     "action_recognition", "bevfusion", "depth_net_mono", "depth_net_stereo", "deformable_detr", "dino",
     "grounding_dino", "mask_grounding_dino", "mal", "mask2former", "ml_recog", "ocdnet", "ocrnet", "optical_inspection",
     "pointpillars", "pose_classification", "re_identification", "rtdetr", "centerpose", "segformer",
+    "nvpanoptix3d_v2",
     "visual_changenet_classify", "visual_changenet_segment"
 ])
 _DATA_SERVICES_ACTIONS = set([
@@ -45,7 +46,7 @@ BACKBONE_AND_FULL_MODEL_PTM_SUPPORTING_NETWORKS = set([
     "dino", "grounding_dino", "mask_grounding_dino", "classification_pyt"
 ])
 
-AUTOML_DISABLED_NETWORKS = ["mal", "nvpanoptix3d"]  # These networks can't support AutoML
+AUTOML_DISABLED_NETWORKS = ["mal", "nvpanoptix3d", "nvpanoptix3d_v2"]  # These networks can't support AutoML
 TENSORBOARD_DISABLED_NETWORKS = [
     'classification_pyt',
 ]  # These networks currently don't produce tfevents logs as they are third party models
@@ -86,6 +87,7 @@ NETWORK_CONTAINER_MAPPING = {"action_recognition": "TAO_PYTORCH",
                              "grounding_dino": "TAO_PYTORCH",
                              "image": "TAO_DS",
                              "mal": "TAO_PYTORCH",
+                             "nvpanoptix3d_v2": "TAO_PYTORCH",
                              "mask2former": "TAO_PYTORCH",
                              "mask_grounding_dino": "TAO_PYTORCH",
                              "ml_recog": "TAO_PYTORCH",
