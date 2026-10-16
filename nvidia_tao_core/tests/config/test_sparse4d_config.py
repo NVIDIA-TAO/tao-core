@@ -80,7 +80,7 @@ def test_sparse4d_metadata_constraints_are_consistent():
 def test_sparse4d_changed_eval_defaults_and_opt_in_switches():
     """Pin intentional compatibility decisions, not numerical tuning choices."""
     config = ExperimentConfig()
-    assert config.dataset.eval_dist_fcn == "center_distance"
+    assert config.dataset.eval_dist_fcn == "iou_3d"
     assert config.dataset.eval_hota is False
     for enabled in (
         config.dataset.sync_route, config.dataset.resize_to_canonical_2d,
