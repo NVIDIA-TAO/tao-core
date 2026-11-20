@@ -126,5 +126,14 @@ def create_app():
 
 app = create_app()
 
+
+def main():
+    """Run the Flask server; entry point for the finetuning-microservice command."""
+    if os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
+        app.run(host="0.0.0.0", port=8008)
+    else:
+        app.run()
+
+
 if __name__ == '__main__':
     app.run(debug=True)
