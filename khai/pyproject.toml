@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "khai"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Placeholder package for the KHAI CI pipeline test."
 requires-python = ">=3.12"
 dependencies = []
@@ -16,8 +16,13 @@ apps = ["PyYAML>=6"]
 [dependency-groups]
 dev = ["pytest==8.3.4"]
 
+# This folder is the `khai` package itself.
 [tool.setuptools]
+package-dir = { "khai" = "." }
 packages = ["khai", "khai.core", "khai.core.cv", "khai.core.cv.schema"]
+
+[tool.setuptools.dynamic]
+version = { attr = "khai.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
