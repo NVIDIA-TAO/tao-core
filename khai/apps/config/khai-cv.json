@@ -1,0 +1,11 @@
+{
+  "data_gear": {
+    "execution": {
+      "images": {
+        "pytorch": "nvcr.io/nvstaging/khai/khai-pytorch@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "deploy": "nvcr.io/nvstaging/khai/khai-deploy@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "data_services": "nvcr.io/nvstaging/khai/khai-data-services@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  }
+}
