@@ -2,9 +2,9 @@
   "data_gear": {
     "execution": {
       "images": {
-        "pytorch": "nvcr.io/nvstaging/khai/khai-pytorch@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "deploy": "nvcr.io/nvstaging/khai/khai-deploy@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "data_services": "nvcr.io/nvstaging/khai/khai-data-services@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        "pytorch": "nvcr.io/nvstaging/khai/khai-pytorch@sha256:77c3c4fa576b35dc1d69b120b37bc70924f9b1361722992eee4116da78e6aa4e",
+        "deploy": "nvcr.io/nvstaging/khai/khai-deploy@sha256:e49570bbd6438b6bc0430ea5ddee055c8f355084bb3a8d661bb442e87903ce07",
+        "data_services": "nvcr.io/nvstaging/khai/khai-data-services@sha256:b5f5c827c5ab2fa996f1faa4df4f93f305d2e9864f66524d3a700842a83f540f"
       }
     }
   }
